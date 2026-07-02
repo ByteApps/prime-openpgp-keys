@@ -252,6 +252,30 @@ fn our_edited_armor_is_packet_clean() {
 }
 
 #[test]
+fn gpg_accepts_seed_derived_key() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = derive_ed25519(&[0x42; 32], 0, "Derived Interop", "derived@example.com", Some("d-pass"))
+        .unwrap();
+    let info = key_info(&PgpKey::Secret(key.clone()));
+
+    gpg.import(&export_armored(&PgpKey::Secret(key)).unwrap());
+
+    let recs = gpg.colons(&["--list-secret-keys", "--with-colons", &info.fingerprint]);
+    assert!(recs.iter().any(|r| r[0] == "fpr" && r[9] == info.fingerprint));
+
+    let (ok, out, err) = gpg.run(&["--check-sigs", "--with-colons", &info.fingerprint], b"");
+    assert!(ok, "--check-sigs failed: {err}");
+    assert!(out.lines().any(|l| l.starts_with("sig:!")), "no valid self-sig: {out}");
+
+    let (ok, _, err) = gpg.run(
+        &["--passphrase", "d-pass", "--local-user", &info.fingerprint, "--sign", "--output", "/dev/null"],
+        b"payload",
+    );
+    assert!(ok, "gpg --sign with derived key failed: {err}");
+}
+
+#[test]
 fn we_import_every_gpg_generated_algorithm() {
     // The reverse direction of the interop story: keys born in gpg parse
     // through pgp-core. (No gpg needed at runtime — fixtures are committed —

@@ -391,6 +391,86 @@ pub fn generate_rsa(
 }
 
 // ---------------------------------------------------------------------------
+// Seed-derived keys
+// ---------------------------------------------------------------------------
+
+/// Fixed creation time for seed-derived keys (Bitcoin genesis block time).
+/// The OpenPGP fingerprint commits to the creation timestamp, so this constant
+/// MUST NEVER CHANGE or re-derived keys stop matching their originals.
+pub const DERIVED_KEY_CREATED_AT: u32 = 1_231_006_505;
+
+/// Domain-separation salt for the HKDF expansion of the device app-seed.
+/// Versioned; bump only alongside a new derivation scheme, never in place.
+const DERIVATION_SALT: &[u8] = b"prime-pgp-keychain/derive/v1";
+
+/// Deterministically derive an Ed25519 (sign+certify) key with a Cv25519
+/// encryption subkey from a 32-byte device app-seed and a key index.
+///
+/// Same seed + same index => byte-identical key material and fingerprint,
+/// regardless of user ID or passphrase (the key is generated unprotected
+/// from the deterministic stream; the passphrase is applied afterwards with
+/// the system RNG so S2K salts never consume derivation bytes).
+pub fn derive_ed25519(
+    app_seed: &[u8; 32],
+    index: u32,
+    name: &str,
+    email: &str,
+    passphrase: Option<&str>,
+) -> Result<SignedSecretKey, PgpError> {
+    use hkdf::Hkdf;
+    use rand_chacha::rand_core::SeedableRng;
+    use sha2::Sha256;
+
+    let hk = Hkdf::<Sha256>::new(Some(DERIVATION_SALT), app_seed);
+    let mut key_seed = [0u8; 32];
+    let mut info = Vec::with_capacity(12);
+    info.extend_from_slice(b"pgp-key/");
+    info.extend_from_slice(&index.to_le_bytes());
+    hk.expand(&info, &mut key_seed)
+        .map_err(|e| PgpError(format!("Key derivation failed: {e}")))?;
+    let mut rng = rand_chacha::ChaCha20Rng::from_seed(key_seed);
+
+    let created = Timestamp::from_secs(DERIVED_KEY_CREATED_AT);
+
+    let subkey = SubkeyParamsBuilder::default()
+        .key_type(KeyType::ECDH(ECCCurve::Curve25519Legacy))
+        .can_encrypt(EncryptionCaps::All)
+        .created_at(created)
+        .build()
+        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+
+    let params = SecretKeyParamsBuilder::default()
+        .key_type(KeyType::Ed25519Legacy)
+        .can_certify(true)
+        .can_sign(true)
+        .created_at(created)
+        .primary_user_id(format!("{name} <{email}>"))
+        .subkeys(vec![subkey])
+        .build()
+        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+
+    let key = params.generate(&mut rng)?;
+
+    // Passphrase protection is applied outside the deterministic stream.
+    let key = match passphrase {
+        Some(pw) if !pw.is_empty() => {
+            let mut sys_rng = thread_rng();
+            let pw = Password::from(pw);
+            let mut k = key;
+            k.primary_key.set_password(&mut sys_rng, &pw)?;
+            for sub in &mut k.secret_subkeys {
+                sub.key.set_password(&mut sys_rng, &pw)?;
+            }
+            k
+        }
+        _ => key,
+    };
+
+    key.verify_bindings()?;
+    Ok(key)
+}
+
+// ---------------------------------------------------------------------------
 // Passphrase handling
 // ---------------------------------------------------------------------------
 

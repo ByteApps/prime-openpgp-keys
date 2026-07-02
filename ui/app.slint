@@ -539,7 +539,7 @@ component CreateView inherits VerticalLayout {
         Text {
             vertical-alignment: center;
             horizontal-stretch: 1;
-            text: "New RSA key";
+            text: "New key";
             color: Theme.palette-foreground;
             font-family: "Montserrat";
             font-size: 18px;
@@ -584,22 +584,57 @@ component CreateView inherits VerticalLayout {
     }
 
     Text {
+        text: "Key type";
+        color: Theme.palette-muted;
+        font-family: "Montserrat";
+        font-size: 13px;
+        font-weight: 700;
+    }
+    HorizontalLayout {
+        height: 64px;
+        SegmentedControl {
+            horizontal-stretch: 1;
+            options: ["RSA (random)", "From seed"];
+            selected-index <=> Ui.create-mode;
+        }
+    }
+
+    if Ui.create-mode == 0: Text {
         text: "Key size";
         color: Theme.palette-muted;
         font-family: "Montserrat";
         font-size: 13px;
         font-weight: 700;
     }
-    SegmentedControl {
-        options: ["2048", "3072", "4096"];
-        selected-index <=> Ui.create-bits-index;
+    if Ui.create-mode == 0: HorizontalLayout {
+        height: 64px;
+        SegmentedControl {
+            horizontal-stretch: 1;
+            options: ["2048", "3072", "4096"];
+            selected-index <=> Ui.create-bits-index;
+        }
+    }
+    // From-seed keys are Ed25519, deterministically derived from the device
+    // master seed: the same account number always recreates the same key,
+    // so a seed-phrase restore recovers the identity.
+    if Ui.create-mode == 1: create-account-input := Input {
+        label: "Account number (same number = same key)";
+        placeholder: "0";
+        value <=> Ui.create-account;
+        submitted => {
+            create-account-input.clear-focus();
+        }
     }
 
     Button {
         full-width: true;
-        text: "Generate";
+        text: Ui.create-mode == 1 ? "Derive" : "Generate";
         clicked => {
-            Callbacks.create-key(Ui.create-name, Ui.create-email, Ui.create-bits-index, Ui.create-pass);
+            if (Ui.create-mode == 1) {
+                Callbacks.create-derived-key(Ui.create-name, Ui.create-email, Ui.create-account, Ui.create-pass);
+            } else {
+                Callbacks.create-key(Ui.create-name, Ui.create-email, Ui.create-bits-index, Ui.create-pass);
+            }
         }
     }
 

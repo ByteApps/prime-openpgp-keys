@@ -13,3 +13,9 @@ rand = "0.8"
 # Same version rpgp uses — only pulled in for the PublicKeyParts trait so we
 # can report RSA modulus sizes; cargo unifies it with rpgp's copy.
 rsa = { version = "0.9", default-features = false }
+# Seed-derived keys: HKDF-SHA256 expands the device app-seed into a
+# per-key-index seed for a deterministic ChaCha20 stream (rand 0.8 family,
+# matching the Rng bound rpgp's generate() takes).
+hkdf = "0.12"
+sha2 = { version = "0.10", default-features = false }
+rand_chacha = "0.3"

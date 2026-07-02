@@ -485,6 +485,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bip39"
+version = "2.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
+dependencies = [
+ "bitcoin_hashes 0.14.101",
+ "serde",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,11 +503,20 @@ checksum = "1e4b40c7323adcfc0a41c4b88143ed58346ff65a288fc144329c5c45e05d70c6"
 
 [[package]]
 name = "bitcoin_hashes"
+version = "0.14.101"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bca4c7abb40c8817d77403c880988cfd484f23ab2365726afb2f798363e2c4a2"
+dependencies = [
+ "hex-conservative 0.2.2",
+]
+
+[[package]]
+name = "bitcoin_hashes"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0982261c82a50d89d1a411602afee0498b3e0debe3d36693f0c661352809639"
 dependencies = [
- "hex-conservative",
+ "hex-conservative 0.3.2",
 ]
 
 [[package]]
@@ -1189,6 +1209,19 @@ name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
+name = "crypto"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "num-derive",
+ "num-traits",
+ "rkyv",
+ "server",
+ "thiserror 1.0.69",
+ "xous",
+]
 
 [[package]]
 name = "crypto-bigint"
@@ -1964,7 +1997,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de4d0b63162220b26a3a955478ebc02e51fe77aa38181d058c55f3d1d6664428"
 dependencies = [
- "bitcoin_hashes",
+ "bitcoin_hashes 0.15.0",
  "crc",
  "heapless",
  "itertools 0.10.5",
@@ -2357,6 +2390,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hex-conservative"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fda06d18ac606267c40c04e41b9947729bf8b9efe74bd4e82b61a5f26a510b9f"
+dependencies = [
+ "arrayvec",
+]
 
 [[package]]
 name = "hex-conservative"
@@ -4625,9 +4667,12 @@ dependencies = [
 name = "pgp-core"
 version = "0.1.0"
 dependencies = [
+ "hkdf",
  "pgp",
  "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "rsa",
+ "sha2",
 ]
 
 [[package]]
@@ -4914,6 +4959,7 @@ dependencies = [
  "foundation-themes",
  "log",
  "pgp-core",
+ "security",
  "server",
  "slint-keyos-platform",
  "slint-keyos-platform-build",
@@ -5568,6 +5614,22 @@ dependencies = [
  "pkcs8",
  "serdect 0.2.0",
  "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "security"
+version = "0.1.0"
+dependencies = [
+ "bip39",
+ "crypto",
+ "log",
+ "num-derive",
+ "num-traits",
+ "rkyv",
+ "server",
+ "thiserror 1.0.69",
+ "xous",
  "zeroize",
 ]
 
@@ -6652,6 +6714,15 @@ name = "unicode-linebreak"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-properties"

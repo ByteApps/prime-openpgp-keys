@@ -74,6 +74,8 @@ export global Ui {
     in-out property <string> create-email: "";
     in-out property <string> create-pass: "";
     in-out property <int> create-bits-index: 0;   // 0=2048 1=3072 2=4096
+    in-out property <int> create-mode: 0;         // 0 = RSA (random), 1 = from seed (Ed25519)
+    in-out property <string> create-account: "0"; // derivation index for from-seed mode
 
     // Busy overlay (key generation).
     in-out property <bool> busy: false;
@@ -98,6 +100,7 @@ export global Callbacks {
     callback show-create();
     callback cancel-create();
     callback create-key(string, string, int, string); // name, email, bits-index, passphrase
+    callback create-derived-key(string, string, string, string); // name, email, account index, passphrase
 
     callback extend-expiry(string, string);       // days ("" = never), passphrase
     callback add-uid(string, string, string);     // name, email, passphrase

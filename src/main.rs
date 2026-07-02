@@ -11,6 +11,7 @@ use slint_keyos_platform::fs::{self, Location, OpenFlags};
 use slint_keyos_platform::slint::{ComponentHandle, ModelRc, Timer, VecModel};
 
 app_ui!("prime-pgp-keychain");
+security::use_api!();
 
 /// App-managed keychain directory on Internal (User) storage.
 const KEYS_DIR: &str = "/pgp-keys";
@@ -364,6 +365,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 u.set_create_email("".into());
                 u.set_create_pass("".into());
                 u.set_create_bits_index(0);
+                u.set_create_mode(0);
+                u.set_create_account("0".into());
                 show_info(&ui, "");
                 u.set_screen(3);
             }
@@ -432,6 +435,69 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     }
                     Err(e) => {
                         log::info!("cb: create-key rsa{bits} err={e}");
+                        show_error(&ui, e);
+                    }
+                }
+            });
+        });
+    }
+
+    // Derive an Ed25519 key from the device master seed (GetAppSeed).
+    {
+        let fs = fs.clone();
+        let ui_weak = ui_weak.clone();
+        let refresh_keys = refresh_keys.clone();
+        let open_key = open_key.clone();
+        callbacks.on_create_derived_key(move |name, email, account, pass| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let name = name.to_string();
+            let email = email.to_string();
+            let pass = pass.to_string();
+            if name.trim().is_empty() || email.trim().is_empty() {
+                show_error(&ui, "Name and email are required".to_string());
+                return;
+            }
+            let index: u32 = match account.trim().parse() {
+                Ok(i) => i,
+                Err(_) => {
+                    show_error(&ui, "Account number must be a whole number".to_string());
+                    return;
+                }
+            };
+
+            let u = ui.global::<Ui>();
+            u.set_busy_text(format!("Deriving key #{index} from device seed…").into());
+            u.set_busy(true);
+
+            let fs = fs.clone();
+            let ui_weak = ui_weak.clone();
+            let refresh_keys = refresh_keys.clone();
+            let open_key = open_key.clone();
+            Timer::single_shot(Duration::from_millis(150), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let passphrase = if pass.is_empty() { None } else { Some(pass.as_str()) };
+                let result = Security::default()
+                    .app_seed()
+                    .map_err(|_| "Device locked or seed unavailable".to_string())
+                    .and_then(|app_seed| {
+                        pgp_core::derive_ed25519(&app_seed, index, name.trim(), email.trim(), passphrase)
+                            .map_err(|e| e.0)
+                    })
+                    .and_then(|key| {
+                        let key = PgpKey::Secret(key);
+                        save_key(&fs, &key).map(|f| (f, key))
+                    });
+                ui.global::<Ui>().set_busy(false);
+                match result {
+                    Ok((filename, key)) => {
+                        let info = pgp_core::key_info(&key);
+                        log::info!("cb: create-key ed25519-derived idx={index} ok fpr={}", info.fingerprint);
+                        refresh_keys();
+                        open_key(filename);
+                        show_info(&ui, &format!("Key #{index} derived from device seed"));
+                    }
+                    Err(e) => {
+                        log::info!("cb: create-key ed25519-derived idx={index} err={e}");
                         show_error(&ui, e);
                     }
                 }

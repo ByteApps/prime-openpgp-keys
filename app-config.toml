@@ -15,3 +15,6 @@ support-url = ""
 
 [permissions]
 template = ["gui-app", "fs-generic", "fs-access"]
+# Seed-derived PGP keys: HMAC-derived per-app seed from the wallet master
+# seed (PIN-gated on hardware; kernel-attested app identity).
+"os/security" = ["GetAppSeed"]
