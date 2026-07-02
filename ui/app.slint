@@ -1,0 +1,1012 @@
+import { Theme, UISize, ButtonVariant } from "@ui/theme.slint";
+import { Callbacks, KeyList, Detail, Browser, Ui, KeyRow, DetailRow, FileRow } from "callbacks.slint";
+import { Button } from "@ui/button.slint";
+import { Icon } from "@ui/icon.slint";
+import { Input } from "@ui/input.slint";
+import { SegmentedControl } from "@ui/segmented_control.slint";
+import { Dialog, DialogVariant } from "@ui/dialog.slint";
+
+export { Callbacks, KeyList, Detail, Browser, Ui, KeyRow, DetailRow, FileRow, Theme }
+
+// A round icon button built from a raw TouchArea. The SDK IconButton sizes its
+// touch area to a fixed control-size rather than the laid-out size, so its
+// clicks don't register once a layout gives it a different size.
+component IconBtn inherits Rectangle {
+    in property <image> icon;
+    in property <color> icon-color: Theme.palette-foreground;
+    in property <length> diameter: 44px;
+    callback clicked();
+
+    width: diameter;
+    height: diameter;
+    border-radius: diameter / 2;
+    background: touch.pressed
+        ? Theme.palette-secondary-pressed
+        : (touch.has-hover ? Theme.palette-secondary : Theme.palette-secondary.with-alpha(0.4));
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.diameter * 0.5;
+        icon: root.icon;
+        icon-color: root.icon-color;
+    }
+}
+
+// One key in the keychain list.
+component KeyEntry inherits Rectangle {
+    in property <KeyRow> entry;
+    height: 64px;
+    background: touch.has-hover ? Theme.palette-secondary : transparent;
+
+    Image {
+        x: 12px;
+        y: (parent.height - self.height) / 2;
+        width: 24px;
+        height: 24px;
+        source: root.entry.has-secret ? @image-url("icons/key.svg") : @image-url("icons/lock.svg");
+        colorize: root.entry.has-secret ? Theme.palette-primary : Theme.palette-foreground;
+    }
+
+    chevron := Image {
+        x: parent.width - self.width - 16px;
+        y: (parent.height - self.height) / 2;
+        width: 20px;
+        height: 20px;
+        source: @image-url("icons/chevron-right.svg");
+        colorize: Theme.palette-muted;
+    }
+
+    touch := TouchArea {
+        x: 48px;
+        y: 0px;
+        width: chevron.x - 48px - 8px;
+        height: parent.height;
+        clicked => {
+            Callbacks.open-key(root.entry.filename);
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.entry.title;
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 17px;
+                overflow: elide;
+            }
+            Text {
+                text: root.entry.subtitle;
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+                overflow: elide;
+            }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.palette-border;
+    }
+}
+
+// One row in the import file browser.
+component FileEntry inherits Rectangle {
+    in property <FileRow> entry;
+    height: 60px;
+    background: touch.has-hover ? Theme.palette-secondary : transparent;
+
+    Image {
+        x: 12px;
+        y: (parent.height - self.height) / 2;
+        width: 24px;
+        height: 24px;
+        source: root.entry.is-folder ? @image-url("icons/folder.svg") : @image-url("icons/file.svg");
+        colorize: root.entry.is-folder ? Theme.palette-primary : Theme.palette-foreground;
+    }
+
+    touch := TouchArea {
+        x: 48px;
+        y: 0px;
+        width: parent.width - 48px;
+        height: parent.height;
+        clicked => {
+            Callbacks.import-entry-activated(root.entry.name, root.entry.is-folder);
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.entry.name;
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 18px;
+                overflow: elide;
+            }
+            Text {
+                text: root.entry.info;
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+            }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.palette-border;
+    }
+}
+
+// A row inside the ••• dropdown menu.
+component MenuRow inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    callback triggered();
+    height: 52px;
+    background: touch.has-hover ? Theme.palette-secondary : transparent;
+
+    touch := TouchArea {
+        clicked => {
+            root.triggered();
+        }
+    }
+    Text {
+        x: 16px;
+        width: parent.width - 16px - 46px;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.text;
+        color: Theme.palette-foreground;
+        font-family: "Montserrat";
+        font-size: 17px;
+        font-weight: 600;
+        overflow: elide;
+    }
+    Image {
+        x: parent.width - self.width - 16px;
+        y: (parent.height - self.height) / 2;
+        width: 22px;
+        height: 22px;
+        source: root.icon;
+        colorize: Theme.palette-foreground;
+    }
+}
+
+// Shared modal chrome: dimmed backdrop + panel anchored near the top so its
+// fields and buttons stay above the ~396px on-screen keyboard overlay.
+component ModalPanel inherits Rectangle {
+    in property <string> title;
+    in property <length> panel-height: 260px;
+    callback cancelled();
+
+    background: rgba(0, 0, 0, 0.55);
+
+    TouchArea {
+        clicked => {
+            root.cancelled();
+        }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 24px + UISize.control-center-status-bar-height;
+        width: 86%;
+        height: root.panel-height;
+        background: Theme.palette-surface;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Theme.palette-border;
+
+        // Swallow taps on the panel so they don't dismiss.
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: root.title;
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 20px;
+                font-weight: 600;
+            }
+            @children
+        }
+    }
+}
+
+// The keychain (home) screen.
+component KeyListView inherits VerticalLayout {
+    spacing: 12px;
+
+    HorizontalLayout {
+        height: 64px;
+        spacing: 8px;
+        Text {
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            text: "PGP Keychain";
+            color: Theme.palette-foreground;
+            font-family: "Montserrat";
+            font-size: 22px;
+            font-weight: 700;
+        }
+        IconBtn {
+            icon: @image-url("icons/ellipsis.svg");
+            diameter: 56px;
+            clicked => {
+                Ui.show-menu = !Ui.show-menu;
+            }
+        }
+    }
+
+    if Ui.message != "": Text {
+        text: Ui.message;
+        color: Ui.message-error ? Theme.palette-danger : Theme.palette-primary;
+        font-family: "Montserrat";
+        font-size: 14px;
+        wrap: word-wrap;
+    }
+    if KeyList.status != "": Text {
+        text: KeyList.status;
+        color: Theme.palette-muted;
+        font-family: "Montserrat";
+        font-size: 16px;
+        horizontal-alignment: center;
+    }
+
+    Flickable {
+        vertical-stretch: 1;
+        viewport-height: KeyList.keys.length * 64px;
+        VerticalLayout {
+            alignment: start;
+            spacing: 0px;
+            for item in KeyList.keys: KeyEntry {
+                entry: item;
+            }
+        }
+    }
+}
+
+// The key detail screen.
+component DetailView inherits VerticalLayout {
+    spacing: 10px;
+
+    HorizontalLayout {
+        height: 56px;
+        spacing: 8px;
+        IconBtn {
+            icon: @image-url("icons/arrow-left.svg");
+            clicked => {
+                Callbacks.close-detail();
+            }
+        }
+        Text {
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            text: Detail.title;
+            color: Theme.palette-foreground;
+            font-family: "Montserrat";
+            font-size: 18px;
+            font-weight: 600;
+            overflow: elide;
+        }
+        IconBtn {
+            icon: @image-url("icons/trash-2.svg");
+            icon-color: Theme.palette-danger;
+            clicked => {
+                Ui.show-delete = true;
+            }
+        }
+    }
+
+    if Ui.message != "": Text {
+        text: Ui.message;
+        color: Ui.message-error ? Theme.palette-danger : Theme.palette-primary;
+        font-family: "Montserrat";
+        font-size: 14px;
+        wrap: word-wrap;
+    }
+
+    Flickable {
+        vertical-stretch: 1;
+        viewport-height: det.preferred-height;
+
+        det := VerticalLayout {
+            alignment: start;
+            spacing: 8px;
+
+            Text {
+                text: Detail.has-secret && Detail.user-ids.length > 1
+                    ? "User IDs (tap to remove)"
+                    : "User IDs";
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+                font-weight: 700;
+            }
+            for uid[i] in Detail.user-ids: Rectangle {
+                height: 44px;
+                background: uid-touch.has-hover ? Theme.palette-secondary : transparent;
+                border-radius: 10px;
+
+                uid-touch := TouchArea {
+                    clicked => {
+                        if (Detail.has-secret && Detail.user-ids.length > 1) {
+                            Ui.selected-uid = i;
+                            Ui.selected-uid-text = uid;
+                            Ui.field-pass = "";
+                            Ui.show-remove-uid = true;
+                        }
+                    }
+                }
+                Text {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: uid;
+                    color: Theme.palette-foreground;
+                    font-family: "Montserrat";
+                    font-size: 15px;
+                    overflow: elide;
+                }
+            }
+
+            Rectangle { height: 6px; }
+
+            for item in Detail.rows: VerticalLayout {
+                spacing: 2px;
+                Text {
+                    text: item.label;
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: item.value;
+                    color: Theme.palette-foreground;
+                    font-family: "SourceCodePro";
+                    font-size: 15px;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 6px; }
+            }
+
+        }
+    }
+
+    // Fixed action bar (never scrolls, so automation taps land reliably).
+    HorizontalLayout {
+        height: 52px;
+        spacing: 10px;
+        Button {
+            full-width: true;
+            text: "Export";
+            clicked => {
+                Ui.export-kind = 0;
+                Ui.export-dest = 0;
+                Ui.show-export = true;
+            }
+        }
+        if Detail.has-secret: Button {
+            full-width: true;
+            variant: ButtonVariant.secondary;
+            text: "Expiry";
+            clicked => {
+                Ui.field-a = "";
+                Ui.field-pass = "";
+                Ui.show-expiry = true;
+            }
+        }
+    }
+    if Detail.has-secret: HorizontalLayout {
+        height: 52px;
+        spacing: 10px;
+        Button {
+            full-width: true;
+            variant: ButtonVariant.secondary;
+            text: "Add user ID";
+            clicked => {
+                Ui.field-a = "";
+                Ui.field-b = "";
+                Ui.field-pass = "";
+                Ui.show-add-uid = true;
+            }
+        }
+        Button {
+            full-width: true;
+            variant: ButtonVariant.secondary;
+            text: "Passphrase";
+            clicked => {
+                Ui.field-a = "";
+                Ui.field-b = "";
+                Ui.show-change-pass = true;
+            }
+        }
+    }
+}
+
+// The import file browser screen.
+component ImportView inherits VerticalLayout {
+    spacing: 12px;
+
+    HorizontalLayout {
+        height: 56px;
+        spacing: 8px;
+        IconBtn {
+            icon: @image-url("icons/x.svg");
+            clicked => {
+                Callbacks.cancel-import();
+            }
+        }
+        Text {
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            text: "Import key (.asc)";
+            color: Theme.palette-foreground;
+            font-family: "Montserrat";
+            font-size: 18px;
+            font-weight: 600;
+        }
+    }
+
+    HorizontalLayout {
+        // Match the SegmentedControl's natural height so the layout doesn't
+        // stretch it and open a gap above the path row.
+        height: 64px;
+        SegmentedControl {
+            horizontal-stretch: 1;
+            options: ["Internal", "Airlock", "USB"];
+            selected-index <=> Browser.location-index;
+            changed(idx, label) => {
+                Callbacks.import-location-changed(idx);
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        height: 48px;
+
+        if !Browser.at-root: IconBtn {
+            icon: @image-url("icons/arrow-left.svg");
+            clicked => {
+                Callbacks.import-go-back();
+            }
+        }
+        Text {
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            text: Browser.path;
+            color: Theme.palette-muted;
+            font-family: "Montserrat";
+            font-size: 15px;
+            overflow: elide;
+        }
+    }
+
+    if Ui.message != "": Text {
+        text: Ui.message;
+        color: Ui.message-error ? Theme.palette-danger : Theme.palette-primary;
+        font-family: "Montserrat";
+        font-size: 14px;
+        wrap: word-wrap;
+    }
+    if Browser.status != "": Text {
+        text: Browser.status;
+        color: Theme.palette-muted;
+        font-family: "Montserrat";
+        font-size: 16px;
+        horizontal-alignment: center;
+    }
+
+    Flickable {
+        vertical-stretch: 1;
+        viewport-height: Browser.entries.length * 60px;
+        VerticalLayout {
+            alignment: start;
+            spacing: 0px;
+            for item in Browser.entries: FileEntry {
+                entry: item;
+            }
+        }
+    }
+}
+
+// The create-key form screen.
+component CreateView inherits VerticalLayout {
+    spacing: 14px;
+
+    HorizontalLayout {
+        height: 56px;
+        spacing: 8px;
+        IconBtn {
+            icon: @image-url("icons/x.svg");
+            clicked => {
+                Callbacks.cancel-create();
+            }
+        }
+        Text {
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            text: "New RSA key";
+            color: Theme.palette-foreground;
+            font-family: "Montserrat";
+            font-size: 18px;
+            font-weight: 600;
+        }
+    }
+
+    if Ui.message != "": Text {
+        text: Ui.message;
+        color: Ui.message-error ? Theme.palette-danger : Theme.palette-primary;
+        font-family: "Montserrat";
+        font-size: 14px;
+        wrap: word-wrap;
+    }
+
+    // Keyboard "Done" blurs each field so the on-screen keyboard drops away
+    // and the controls below stay tappable.
+    create-name-input := Input {
+        label: "Name";
+        placeholder: "Alice Example";
+        value <=> Ui.create-name;
+        submitted => {
+            create-name-input.clear-focus();
+        }
+    }
+    create-email-input := Input {
+        label: "Email";
+        placeholder: "alice@example.com";
+        value <=> Ui.create-email;
+        submitted => {
+            create-email-input.clear-focus();
+        }
+    }
+    create-pass-input := Input {
+        label: "Passphrase (optional)";
+        placeholder: "Passphrase";
+        input-type: InputType.password;
+        value <=> Ui.create-pass;
+        submitted => {
+            create-pass-input.clear-focus();
+        }
+    }
+
+    Text {
+        text: "Key size";
+        color: Theme.palette-muted;
+        font-family: "Montserrat";
+        font-size: 13px;
+        font-weight: 700;
+    }
+    SegmentedControl {
+        options: ["2048", "3072", "4096"];
+        selected-index <=> Ui.create-bits-index;
+    }
+
+    Button {
+        full-width: true;
+        text: "Generate";
+        clicked => {
+            Callbacks.create-key(Ui.create-name, Ui.create-email, Ui.create-bits-index, Ui.create-pass);
+        }
+    }
+
+    Rectangle { vertical-stretch: 1; }
+}
+
+export component AppWindow inherits Window {
+    title: "PGP Keychain";
+    preferred-width: 480px;
+    preferred-height: 800px;
+    background: Theme.palette-background;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.palette-background;
+
+        // Main content.
+        VerticalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            padding-top: 24px + UISize.control-center-status-bar-height;
+            padding-bottom: 20px;
+
+            if Ui.screen == 0: KeyListView {}
+            if Ui.screen == 1: DetailView {}
+            if Ui.screen == 2: ImportView {}
+            if Ui.screen == 3: CreateView {}
+        }
+
+        // --- Overlays (later siblings render on top of the content) ---
+
+        // ••• dropdown, anchored top-right under the menu button.
+        if Ui.show-menu: Rectangle {
+            width: 100%;
+            height: 100%;
+            TouchArea {
+                clicked => {
+                    Ui.show-menu = false;
+                }
+            }
+            Rectangle {
+                x: parent.width - self.width - 20px;
+                y: 20px + UISize.control-center-status-bar-height + 44px;
+                width: 230px;
+                height: 118px;
+                background: Theme.palette-surface;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.palette-border;
+
+                VerticalLayout {
+                    padding-top: 6px;
+                    padding-bottom: 6px;
+                    MenuRow {
+                        text: "New key";
+                        icon: @image-url("icons/plus.svg");
+                        triggered => {
+                            Ui.show-menu = false;
+                            Callbacks.show-create();
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.palette-border;
+                    }
+                    MenuRow {
+                        text: "Import key";
+                        icon: @image-url("icons/download.svg");
+                        triggered => {
+                            Ui.show-menu = false;
+                            Callbacks.start-import();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extend expiration: days + passphrase.
+        if Ui.show-expiry: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Extend expiration";
+            panel-height: 330px;
+            cancelled => {
+                Ui.show-expiry = false;
+            }
+
+            expiry-days-input := Input {
+                label: "Days from today (empty = never)";
+                placeholder: "365";
+                value <=> Ui.field-a;
+                submitted => {
+                    expiry-days-input.clear-focus();
+                }
+            }
+            expiry-pass-input := Input {
+                label: "Passphrase";
+                placeholder: "Passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-pass;
+                submitted => {
+                    expiry-pass-input.clear-focus();
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-expiry = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    text: "Apply";
+                    clicked => {
+                        Ui.show-expiry = false;
+                        Callbacks.extend-expiry(Ui.field-a, Ui.field-pass);
+                    }
+                }
+            }
+        }
+
+        // Add user ID: name + email + passphrase.
+        if Ui.show-add-uid: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Add user ID";
+            panel-height: 410px;
+            cancelled => {
+                Ui.show-add-uid = false;
+            }
+
+            uid-name-input := Input {
+                label: "Name";
+                placeholder: "Alice Example";
+                value <=> Ui.field-a;
+                submitted => {
+                    uid-name-input.clear-focus();
+                }
+            }
+            uid-email-input := Input {
+                label: "Email";
+                placeholder: "alice@example.com";
+                value <=> Ui.field-b;
+                submitted => {
+                    uid-email-input.clear-focus();
+                }
+            }
+            uid-pass-input := Input {
+                label: "Passphrase";
+                placeholder: "Passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-pass;
+                submitted => {
+                    uid-pass-input.clear-focus();
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-add-uid = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    text: "Add";
+                    clicked => {
+                        Ui.show-add-uid = false;
+                        Callbacks.add-uid(Ui.field-a, Ui.field-b, Ui.field-pass);
+                    }
+                }
+            }
+        }
+
+        // Remove user ID: confirmation + passphrase.
+        if Ui.show-remove-uid: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Remove user ID";
+            panel-height: 330px;
+            cancelled => {
+                Ui.show-remove-uid = false;
+            }
+
+            Text {
+                text: "Remove \"" + Ui.selected-uid-text + "\"?";
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 15px;
+                wrap: word-wrap;
+            }
+            remove-pass-input := Input {
+                label: "Passphrase";
+                placeholder: "Passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-pass;
+                submitted => {
+                    remove-pass-input.clear-focus();
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-remove-uid = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.danger;
+                    text: "Remove";
+                    clicked => {
+                        Ui.show-remove-uid = false;
+                        Callbacks.remove-uid(Ui.selected-uid, Ui.field-pass);
+                    }
+                }
+            }
+        }
+
+        // Change passphrase: old + new.
+        if Ui.show-change-pass: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Change passphrase";
+            panel-height: 340px;
+            cancelled => {
+                Ui.show-change-pass = false;
+            }
+
+            old-pass-input := Input {
+                label: "Current passphrase";
+                placeholder: "Current passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-a;
+                submitted => {
+                    old-pass-input.clear-focus();
+                }
+            }
+            new-pass-input := Input {
+                label: "New passphrase (empty = remove)";
+                placeholder: "New passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-b;
+                submitted => {
+                    new-pass-input.clear-focus();
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-change-pass = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    text: "Change";
+                    clicked => {
+                        Ui.show-change-pass = false;
+                        Callbacks.change-passphrase(Ui.field-a, Ui.field-b);
+                    }
+                }
+            }
+        }
+
+        // Export sheet: what + where.
+        if Ui.show-export: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Export key";
+            panel-height: Detail.has-secret ? 400px : 310px;
+            cancelled => {
+                Ui.show-export = false;
+            }
+
+            if Detail.has-secret: Text {
+                text: "Contents";
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+                font-weight: 700;
+            }
+            if Detail.has-secret: SegmentedControl {
+                options: ["Public only", "Full secret"];
+                selected-index <=> Ui.export-kind;
+            }
+            Text {
+                text: "Destination";
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+                font-weight: 700;
+            }
+            SegmentedControl {
+                options: ["Internal", "Airlock"];
+                selected-index <=> Ui.export-dest;
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-export = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    text: "Export";
+                    clicked => {
+                        Ui.show-export = false;
+                        if (Ui.export-kind == 1) {
+                            Ui.show-export-secret-confirm = true;
+                        } else {
+                            Callbacks.export-key(false, Ui.export-dest);
+                        }
+                    }
+                }
+            }
+        }
+
+        if Ui.show-export-secret-confirm: Dialog {
+            width: 100%;
+            height: 100%;
+            open: true;
+            title: "Export secret key?";
+            message: "The exported file contains your private key material. Anyone with the file (and passphrase) controls this identity.";
+            primary-action: "Export secret key";
+            secondary-action: "Cancel";
+            variant: DialogVariant.danger;
+            primary-clicked => {
+                Ui.show-export-secret-confirm = false;
+                Callbacks.export-key(true, Ui.export-dest);
+            }
+            secondary-clicked => {
+                Ui.show-export-secret-confirm = false;
+            }
+            dismissed => {
+                Ui.show-export-secret-confirm = false;
+            }
+        }
+
+        if Ui.show-delete: Dialog {
+            width: 100%;
+            height: 100%;
+            open: true;
+            title: "Delete key";
+            message: "Delete \"" + Detail.title + "\" from the keychain?" + (Detail.has-secret ? " The secret key will be gone unless you exported it." : "");
+            primary-action: "Delete";
+            secondary-action: "Cancel";
+            variant: DialogVariant.danger;
+            primary-clicked => {
+                Ui.show-delete = false;
+                Callbacks.delete-key(Detail.filename);
+            }
+            secondary-clicked => {
+                Ui.show-delete = false;
+            }
+            dismissed => {
+                Ui.show-delete = false;
+            }
+        }
+
+        // Busy overlay (key generation) — topmost.
+        if Ui.busy: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            TouchArea {} // swallow all taps
+
+            Rectangle {
+                width: 86%;
+                height: 120px;
+                background: Theme.palette-surface;
+                border-radius: 16px;
+                border-width: 1px;
+                border-color: Theme.palette-border;
+
+                Text {
+                    x: 24px;
+                    width: parent.width - 48px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    text: Ui.busy-text;
+                    color: Theme.palette-foreground;
+                    font-family: "Montserrat";
+                    font-size: 17px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

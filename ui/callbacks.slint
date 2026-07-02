@@ -1,0 +1,108 @@
+// One row in the keychain list.
+export struct KeyRow {
+    filename: string,     // backing file in /pgp-keys (stable id for callbacks)
+    title: string,        // primary user ID
+    subtitle: string,     // e.g. "RSA · 2048 bits · secret key"
+    has-secret: bool,
+}
+
+// One label/value line in the key detail view.
+export struct DetailRow {
+    label: string,
+    value: string,
+}
+
+// One row in the import file browser.
+export struct FileRow {
+    name: string,
+    info: string,         // human size, or "Folder"
+    is-folder: bool,
+}
+
+// The keychain (home) screen, driven from Rust.
+export global KeyList {
+    in property <[KeyRow]> keys;
+    in property <string> status: "";  // e.g. "No keys yet — import or create one"
+}
+
+// The key detail screen, driven from Rust.
+export global Detail {
+    in property <string> filename;
+    in property <string> title;             // primary user ID
+    in property <[string]> user-ids;
+    in property <[DetailRow]> rows;         // fingerprint / algo / dates / subkeys
+    in property <bool> has-secret;
+}
+
+// The import browser screen, driven from Rust.
+export global Browser {
+    in property <[FileRow]> entries;
+    in property <string> path: "/";
+    in property <bool> at-root: true;
+    // Which storage tab is active: 0 = Internal (User), 1 = Airlock, 2 = USB.
+    in-out property <int> location-index: 0;
+    // Non-empty when the current location can't be listed (e.g. USB not connected).
+    in property <string> status: "";
+}
+
+// Transient UI state: which screen/modal is showing, and shared field values.
+export global Ui {
+    // 0 = key list, 1 = key detail, 2 = import browser, 3 = create form.
+    in-out property <int> screen: 0;
+    in-out property <bool> show-menu: false;      // the ••• dropdown menu
+
+    // Modals (all nested in the root container — see app.slint).
+    in-out property <bool> show-expiry: false;    // days + passphrase
+    in-out property <bool> show-add-uid: false;   // name + email + passphrase
+    in-out property <bool> show-remove-uid: false; // confirm + passphrase
+    in-out property <bool> show-change-pass: false; // old + new passphrase
+    in-out property <bool> show-export: false;     // kind + destination sheet
+    in-out property <bool> show-export-secret-confirm: false;
+    in-out property <bool> show-delete: false;     // delete confirmation
+
+    // Shared modal fields.
+    in-out property <string> field-a: "";         // days / name / old pass
+    in-out property <string> field-b: "";         // email / new pass
+    in-out property <string> field-pass: "";      // passphrase field
+    in-out property <int> selected-uid: -1;       // index for remove-uid
+    in-out property <string> selected-uid-text: "";
+    in-out property <int> export-kind: 0;         // 0 = public, 1 = full secret
+    in-out property <int> export-dest: 0;         // 0 = Internal, 1 = Airlock
+
+    // Create form fields.
+    in-out property <string> create-name: "";
+    in-out property <string> create-email: "";
+    in-out property <string> create-pass: "";
+    in-out property <int> create-bits-index: 0;   // 0=2048 1=3072 2=4096
+
+    // Busy overlay (key generation).
+    in-out property <bool> busy: false;
+    in property <string> busy-text: "";
+
+    in property <string> message: "";             // transient info/error banner
+    in property <bool> message-error: false;
+}
+
+// Callbacks bridged to Rust in main.rs.
+export global Callbacks {
+    callback refresh-keys();
+    callback open-key(string);                    // filename
+    callback close-detail();
+
+    callback start-import();
+    callback import-location-changed(int);        // tab index
+    callback import-entry-activated(string, bool); // name, is-folder
+    callback import-go-back();
+    callback cancel-import();
+
+    callback show-create();
+    callback cancel-create();
+    callback create-key(string, string, int, string); // name, email, bits-index, passphrase
+
+    callback extend-expiry(string, string);       // days ("" = never), passphrase
+    callback add-uid(string, string, string);     // name, email, passphrase
+    callback remove-uid(int, string);             // uid index, passphrase
+    callback change-passphrase(string, string);   // old, new ("" = remove protection)
+    callback export-key(bool, int);               // export secret?, dest location index
+    callback delete-key(string);                  // filename
+}

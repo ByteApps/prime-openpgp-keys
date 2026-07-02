@@ -1,0 +1,15 @@
+[package]
+name = "pgp-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Pure-Rust OpenPGP (rpgp). Pinned: >= 0.19.0 is required (CVE-2026-21895,
+# panic parsing crafted RSA secret-key packets — we parse untrusted .asc).
+# No default features: drops bzip2 message decompression, irrelevant for
+# key management. No C deps, no rayon, so it cross-compiles like hayro/image.
+pgp = { version = "=0.20.0", default-features = false }
+rand = "0.8"
+# Same version rpgp uses — only pulled in for the PublicKeyParts trait so we
+# can report RSA modulus sizes; cargo unifies it with rpgp's copy.
+rsa = { version = "0.9", default-features = false }
