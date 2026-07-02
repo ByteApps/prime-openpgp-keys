@@ -6,6 +6,14 @@ edition = "2021"
 [workspace]
 members = [".", "pgp-core"]
 
+# KeyOS's own getrandom override (vendored in vendor/getrandom, see its
+# Cargo.toml header): on --cfg keyos (hardware) builds it sources entropy
+# from the os TRNG server; on host/simulator builds it behaves like stock
+# getrandom 0.2. Without this, the armv7a-unknown-xous-elf build fails with
+# "target is not supported".
+[patch.crates-io]
+getrandom = { path = "vendor/getrandom" }
+
 # Debug builds (what `foundation sim` produces) make RSA keygen take minutes;
 # optimizing just the crypto math crates keeps in-app generation usable.
 [profile.dev.package.rsa]
