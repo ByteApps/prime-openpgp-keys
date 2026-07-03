@@ -2,9 +2,10 @@
 
 An OpenPGP key manager for Foundation's **Passport Prime**, built as a Rust
 binary with a **Slint** UI on **KeyOS** (Foundation's Rust microkernel on
-Xous). Create, import, inspect, edit, and export OpenPGP keys — including
-keys **derived deterministically from the device's master seed**, so a seed
-phrase restore recovers your PGP identity.
+Xous). Create, import, inspect, edit, and export OpenPGP keys, and **sign
+arbitrary files** with them — including keys **derived deterministically
+from the device's master seed**, so a seed phrase restore recovers your PGP
+identity.
 
 <p align="center">
   <img src="screenshots/keychain.png" alt="Keychain list" width="280">
@@ -32,6 +33,10 @@ phrase restore recovers your PGP identity.
 - **Edit** (secret keys): extend or clear the **expiration**, **add/remove
   user IDs**, and **change or remove the passphrase** — implemented as
   proper self-signature rebuilds that GnuPG verifies.
+- **Sign files** (secret keys): pick any file on Internal, Airlock, or USB
+  and write a detached binary OpenPGP signature next to it as `<file>.sig` —
+  the same output as `gpg --detach-sign`, verifiable anywhere with
+  `gpg --verify <file>.sig <file>`.
 - **Export**: public-only or full secret key (behind a danger confirmation),
   to Internal or Airlock.
 - Keys live as one armored file per key in `/pgp-keys` on Internal storage —
@@ -79,15 +84,17 @@ nix develop ~/.foundation/sdk/current --command cargo test -p pgp-core   # host 
 
 All OpenPGP logic lives in the UI-free **`pgp-core/`** subcrate so it can be
 tested on the host: 28 tests covering per-algorithm parsing against
-gpg-generated fixtures, generation round-trips, every edit operation, seed
-derivation determinism (uid/passphrase independence, index separation), and
-**GnuPG interop** — the suite shells out to a real `gpg` in a throwaway
-`GNUPGHOME` to prove our exports import, our edited keys verify, and our
-rotated passphrases actually unlock signing (skipped cleanly when gpg is
-absent). A workspace-level simulator UI test
-(`../ui-automation/tests/pgp-keychain.sh`, 14 steps) drives every flow through
-real taps and the on-screen keyboard, including derive → delete → re-derive
-reproducing the same fingerprint.
+gpg-generated fixtures, generation round-trips, every edit operation,
+detached-signing round-trips (with tamper rejection) across RSA, Ed25519,
+and NIST P-256, seed derivation determinism (uid/passphrase independence,
+index separation), and **GnuPG interop** — the suite shells out to a real
+`gpg` in a throwaway `GNUPGHOME` to prove our exports import, our edited
+keys verify, our rotated passphrases actually unlock signing, and our
+detached signatures come back `GOODSIG` from `gpg --verify` (skipped cleanly
+when gpg is absent). A workspace-level simulator UI test
+(`../ui-automation/tests/pgp-keychain.sh`, 15 steps) drives every flow through
+real taps and the on-screen keyboard, including signing a file and derive →
+delete → re-derive reproducing the same fingerprint.
 
 ## Permissions
 
