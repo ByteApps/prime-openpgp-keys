@@ -276,6 +276,44 @@ fn gpg_accepts_seed_derived_key() {
 }
 
 #[test]
+fn gpg_verifies_our_detached_signature() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    for name in ["rsa2048-secret.asc", "ed25519-cv25519-secret.asc"] {
+        let sk = fixture_secret(name);
+        gpg.import(&export_public_armored(&PgpKey::Secret(sk.clone())).unwrap());
+
+        let data = b"interop payload\n";
+        let sig = sign_detached(&sk, PASS, data).unwrap();
+
+        let data_path = gpg.home.join(format!("{name}.payload"));
+        let sig_path = gpg.home.join(format!("{name}.payload.sig"));
+        std::fs::write(&data_path, data).unwrap();
+        std::fs::write(&sig_path, &sig).unwrap();
+
+        let (ok, out, err) = gpg.run(
+            &[
+                "--status-fd",
+                "1",
+                "--verify",
+                sig_path.to_str().unwrap(),
+                data_path.to_str().unwrap(),
+            ],
+            b"",
+        );
+        assert!(ok && out.contains("GOODSIG"), "{name}: gpg --verify failed: {out}{err}");
+
+        // tampered payload must fail verification
+        std::fs::write(&data_path, b"interop payload tampered\n").unwrap();
+        let (ok, _, _) = gpg.run(
+            &["--verify", sig_path.to_str().unwrap(), data_path.to_str().unwrap()],
+            b"",
+        );
+        assert!(!ok, "{name}: gpg accepted a tampered payload");
+    }
+}
+
+#[test]
 fn we_import_every_gpg_generated_algorithm() {
     // The reverse direction of the interop story: keys born in gpg parse
     // through pgp-core. (No gpg needed at runtime — fixtures are committed —

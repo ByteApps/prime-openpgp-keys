@@ -59,6 +59,11 @@ export global Ui {
     in-out property <bool> show-export: false;     // kind + destination sheet
     in-out property <bool> show-export-secret-confirm: false;
     in-out property <bool> show-delete: false;     // delete confirmation
+    in-out property <bool> show-sign-pass: false;  // sign-file passphrase
+
+    // Sign-file flow: the import browser doubles as the file picker.
+    in-out property <bool> browse-sign: false;
+    in-out property <string> sign-file-name: "";
 
     // Shared modal fields.
     in-out property <string> field-a: "";         // days / name / old pass
@@ -108,4 +113,7 @@ export global Callbacks {
     callback change-passphrase(string, string);   // old, new ("" = remove protection)
     callback export-key(bool, int);               // export secret?, dest location index
     callback delete-key(string);                  // filename
+
+    callback start-sign();                        // open browser as sign-file picker
+    callback sign-file(string);                   // passphrase (target staged in Rust)
 }

@@ -29,6 +29,8 @@ struct State {
     current: Option<CurrentKey>,
     import_location: Location,
     import_path: String, // current import-browser directory, always starts with '/'
+    sign_mode: bool,     // the import browser is picking a file to sign
+    sign_target: Option<(String, Location)>, // picked file awaiting passphrase
 }
 
 fn app_main(cx: AppContext, ui: AppWindow) {
@@ -43,6 +45,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         current: None,
         import_location: Location::User,
         import_path: "/".to_string(),
+        sign_mode: false,
+        sign_target: None,
     }));
 
     if let Err(e) = fs.create_dir(KEYS_DIR, Location::User) {
@@ -127,9 +131,9 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let ui_weak = ui_weak.clone();
         Rc::new(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let (loc, path) = {
+            let (loc, path, sign_mode) = {
                 let s = state.borrow();
-                (s.import_location, s.import_path.clone())
+                (s.import_location, s.import_path.clone(), s.sign_mode)
             };
             let browser = ui.global::<Browser>();
 
@@ -152,7 +156,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                             }
                             if entry.is_dir {
                                 items.push((true, entry.name, "Folder".to_string()));
-                            } else if entry.name.to_lowercase().ends_with(".asc") {
+                            } else if sign_mode || entry.name.to_lowercase().ends_with(".asc") {
                                 let size = human_size(entry.len);
                                 items.push((false, entry.name, size));
                             }
@@ -226,10 +230,35 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 let mut s = state.borrow_mut();
                 s.import_location = Location::User;
                 s.import_path = "/".to_string();
+                s.sign_mode = false;
             }
             if let Some(ui) = ui_weak.upgrade() {
                 show_info(&ui, "");
                 ui.global::<Browser>().set_location_index(0);
+                ui.global::<Ui>().set_browse_sign(false);
+                ui.global::<Ui>().set_screen(2);
+            }
+            refresh_import();
+        });
+    }
+
+    // Open the same browser as a pick-any-file-to-sign dialog.
+    {
+        let state = state.clone();
+        let ui_weak = ui_weak.clone();
+        let refresh_import = refresh_import.clone();
+        callbacks.on_start_sign(move || {
+            {
+                let mut s = state.borrow_mut();
+                s.import_location = Location::User;
+                s.import_path = "/".to_string();
+                s.sign_mode = true;
+                s.sign_target = None;
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                show_info(&ui, "");
+                ui.global::<Browser>().set_location_index(0);
+                ui.global::<Ui>().set_browse_sign(true);
                 ui.global::<Ui>().set_screen(2);
             }
             refresh_import();
@@ -262,14 +291,26 @@ fn app_main(cx: AppContext, ui: AppWindow) {
     }
 
     {
+        let state = state.clone();
         let ui_weak = ui_weak.clone();
         let refresh_keys = refresh_keys.clone();
         callbacks.on_cancel_import(move || {
+            let was_sign = {
+                let mut s = state.borrow_mut();
+                let was = s.sign_mode;
+                s.sign_mode = false;
+                s.sign_target = None;
+                was
+            };
             if let Some(ui) = ui_weak.upgrade() {
                 show_info(&ui, "");
-                ui.global::<Ui>().set_screen(0);
+                ui.global::<Ui>().set_browse_sign(false);
+                // Sign picking starts from the key detail screen; return there.
+                ui.global::<Ui>().set_screen(if was_sign { 1 } else { 0 });
             }
-            refresh_keys();
+            if !was_sign {
+                refresh_keys();
+            }
         });
     }
 
@@ -292,6 +333,15 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             if is_folder {
                 state.borrow_mut().import_path = full;
                 refresh_import();
+                return;
+            }
+
+            if state.borrow().sign_mode {
+                state.borrow_mut().sign_target = Some((full, loc));
+                let u = ui.global::<Ui>();
+                u.set_sign_file_name(name.clone());
+                u.set_field_pass("".into());
+                u.set_show_sign_pass(true);
                 return;
             }
 
@@ -694,6 +744,64 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         });
     }
 
+    // --- Sign file (detached binary .sig next to the input) ---
+
+    {
+        let fs = fs.clone();
+        let state = state.clone();
+        let ui_weak = ui_weak.clone();
+        callbacks.on_sign_file(move |pass| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some((path, loc)) = state.borrow().sign_target.clone() else { return };
+            let pass = pass.to_string();
+
+            let u = ui.global::<Ui>();
+            u.set_busy_text("Signing file…".into());
+            u.set_busy(true);
+
+            // Same trick as keygen: let the busy overlay paint one frame
+            // before file read + signing block the event loop.
+            let fs = fs.clone();
+            let state = state.clone();
+            let ui_weak = ui_weak.clone();
+            Timer::single_shot(Duration::from_millis(150), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let sig_path = format!("{path}.sig");
+                let loc_name = match loc {
+                    Location::Airlock => "airlock",
+                    Location::Usb => "usb",
+                    _ => "internal",
+                };
+                let result = read_bytes(&fs, &path, loc)
+                    .and_then(|data| {
+                        with_secret_key(&state, |sk| pgp_core::sign_detached(sk, &pass, &data))
+                    })
+                    .and_then(|sig| {
+                        fs.open_file(sig_path.as_str(), loc, OpenFlags::CREATE)
+                            .and_then(|mut f| f.overwrite(&sig))
+                            .map_err(|e| err_msg(&e))
+                    });
+                ui.global::<Ui>().set_busy(false);
+                match result {
+                    Ok(()) => {
+                        log::info!("cb: sign-file {name} ok path={sig_path} loc={loc_name}");
+                        state.borrow_mut().sign_mode = false;
+                        ui.global::<Ui>().set_browse_sign(false);
+                        ui.global::<Ui>().set_screen(1);
+                        show_info(&ui, &format!("Signature written: {sig_path}"));
+                    }
+                    Err(e) => {
+                        // Stay on the browser so the user can retry (e.g.
+                        // wrong passphrase, USB unplugged mid-flow).
+                        log::info!("cb: sign-file {name} err={e}");
+                        show_error(&ui, e);
+                    }
+                }
+            });
+        });
+    }
+
     ui.run().expect("UI running");
 }
 
@@ -720,10 +828,10 @@ fn save_key(fs: &Fs, key: &PgpKey) -> Result<String, String> {
     Ok(filename)
 }
 
-/// Run an edit op against the current key, which must have secret material.
-fn with_secret_key<F>(state: &Rc<RefCell<State>>, op: F) -> Result<pgp_core::SignedSecretKey, String>
+/// Run an op against the current key, which must have secret material.
+fn with_secret_key<R, F>(state: &Rc<RefCell<State>>, op: F) -> Result<R, String>
 where
-    F: FnOnce(&pgp_core::SignedSecretKey) -> Result<pgp_core::SignedSecretKey, pgp_core::PgpError>,
+    F: FnOnce(&pgp_core::SignedSecretKey) -> Result<R, pgp_core::PgpError>,
 {
     let s = state.borrow();
     let cur = s.current.as_ref().ok_or("No key open")?;

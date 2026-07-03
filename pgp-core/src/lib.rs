@@ -12,16 +12,17 @@ use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use pgp::composed::{
-    ArmorOptions, EncryptionCaps, KeyType, PublicOrSecret, SecretKeyParamsBuilder,
-    SubkeyParamsBuilder,
+    ArmorOptions, DetachedSignature, EncryptionCaps, KeyType, PublicOrSecret,
+    SecretKeyParamsBuilder, SubkeyParamsBuilder,
 };
 use pgp::crypto::ecc_curve::ECCCurve;
 use pgp::packet::{
     PacketTrait, Signature, SignatureConfig, SignatureType, Subpacket, SubpacketData, UserId,
 };
+use pgp::ser::Serialize as _;
 use pgp::types::{
     Duration as PgpDuration, Fingerprint, KeyDetails as _, KeyVersion, Password, PublicParams,
-    SignedUser, Timestamp,
+    SignedUser, SigningKey, Timestamp,
 };
 use rand::thread_rng;
 use rsa::traits::PublicKeyParts;
@@ -514,6 +515,56 @@ pub fn change_passphrase(
         }
     }
     Ok(k)
+}
+
+// ---------------------------------------------------------------------------
+// Data signing
+// ---------------------------------------------------------------------------
+
+/// Detached binary OpenPGP signature over `data` — raw signature-packet
+/// bytes, the same shape `gpg --detach-sign` writes to a `.sig` file.
+///
+/// Signs with the primary key when its newest self-cert carries the sign
+/// flag (all keys this app generates do), otherwise with the newest
+/// signing-capable secret subkey. Primary and subkeys share one passphrase
+/// everywhere in this app, so a single `pass` covers either signer.
+pub fn sign_detached(
+    key: &SignedSecretKey,
+    pass: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, PgpError> {
+    let pw = to_password(pass);
+
+    let fpr = key.primary_key.fingerprint();
+    let key_id = key.primary_key.legacy_key_id();
+    let primary_signs = latest_self_cert(&key.details.users, &fpr, &key_id)
+        .map_or(true, |sig| sig.key_flags().sign());
+
+    // Unlock explicitly first so a bad passphrase surfaces as
+    // WRONG_PASSPHRASE instead of an opaque signing error.
+    let signer: Box<&dyn SigningKey> = if primary_signs {
+        key.primary_key
+            .unlock(&pw, |_, _| Ok(()))
+            .map_err(wrong_pw)?
+            .map_err(|e| PgpError(e.to_string()))?;
+        Box::new(&key.primary_key)
+    } else {
+        let sub = key
+            .secret_subkeys
+            .iter()
+            .filter(|s| s.signatures.first().is_some_and(|b| b.key_flags().sign()))
+            .max_by_key(|s| s.key.created_at().as_secs())
+            .ok_or_else(|| PgpError("Key has no signing-capable secret key".into()))?;
+        sub.key
+            .unlock(&pw, |_, _| Ok(()))
+            .map_err(wrong_pw)?
+            .map_err(|e| PgpError(e.to_string()))?;
+        Box::new(&sub.key)
+    };
+
+    let hash = signer.hash_alg();
+    let sig = DetachedSignature::sign_binary_data(thread_rng(), &signer, &pw, hash, data)?;
+    Ok(sig.to_bytes()?)
 }
 
 // ---------------------------------------------------------------------------

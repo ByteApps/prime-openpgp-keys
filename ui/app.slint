@@ -434,6 +434,17 @@ component DetailView inherits VerticalLayout {
             }
         }
     }
+    if Detail.has-secret: HorizontalLayout {
+        height: 52px;
+        Button {
+            full-width: true;
+            variant: ButtonVariant.secondary;
+            text: "Sign file";
+            clicked => {
+                Callbacks.start-sign();
+            }
+        }
+    }
 }
 
 // The import file browser screen.
@@ -452,7 +463,7 @@ component ImportView inherits VerticalLayout {
         Text {
             vertical-alignment: center;
             horizontal-stretch: 1;
-            text: "Import key (.asc)";
+            text: Ui.browse-sign ? "Choose file to sign" : "Import key (.asc)";
             color: Theme.palette-foreground;
             font-family: "Montserrat";
             font-size: 18px;
@@ -860,6 +871,53 @@ export component AppWindow inherits Window {
                     clicked => {
                         Ui.show-remove-uid = false;
                         Callbacks.remove-uid(Ui.selected-uid, Ui.field-pass);
+                    }
+                }
+            }
+        }
+
+        // Sign file: confirm target + passphrase.
+        if Ui.show-sign-pass: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Sign file";
+            panel-height: 330px;
+            cancelled => {
+                Ui.show-sign-pass = false;
+            }
+
+            Text {
+                text: "Sign \"" + Ui.sign-file-name + "\" with " + Detail.title + "?";
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 15px;
+                wrap: word-wrap;
+            }
+            sign-pass-input := Input {
+                label: "Passphrase";
+                placeholder: "Passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-pass;
+                submitted => {
+                    sign-pass-input.clear-focus();
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-sign-pass = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    text: "Sign";
+                    clicked => {
+                        Ui.show-sign-pass = false;
+                        Callbacks.sign-file(Ui.field-pass);
                     }
                 }
             }

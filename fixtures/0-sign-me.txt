@@ -1,0 +1,2 @@
+Sign-me fixture for the pgp-keychain UI test.
+The leading "0" makes this sort as the first file row in the sign browser.

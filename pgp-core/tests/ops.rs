@@ -325,3 +325,37 @@ fn edits_refused_without_secret_material() {
     // parse still yields Public for public fixtures.
     assert!(!parse_one("rsa2048-public.asc").has_secret());
 }
+
+// ---------------------------------------------------------------------------
+// Detached signing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sign_detached_roundtrip_all_algorithms() {
+    use pgp::composed::{Deserializable, DetachedSignature};
+
+    for name in ["rsa2048", "rsa4096", "ed25519-cv25519", "nistp256"] {
+        let sk = secret(&format!("{name}-secret.asc"));
+        let data = b"detached signing payload";
+        let sig_bytes = sign_detached(&sk, PASS, data).unwrap();
+
+        // The output must be a bare binary signature packet, not armor.
+        assert!(!sig_bytes.starts_with(b"-----"), "{name}: output is armored");
+
+        let parsed = DetachedSignature::from_bytes(&sig_bytes[..])
+            .unwrap_or_else(|e| panic!("{name}: unparseable signature: {e}"));
+        parsed
+            .verify(&sk.primary_key.public_key(), data)
+            .unwrap_or_else(|e| panic!("{name}: signature does not verify: {e}"));
+        parsed
+            .verify(&sk.primary_key.public_key(), b"tampered payload")
+            .expect_err(&format!("{name}: tampered data verified"));
+    }
+}
+
+#[test]
+fn sign_detached_wrong_passphrase() {
+    let sk = secret("rsa2048-secret.asc");
+    let err = sign_detached(&sk, "not-the-pass", b"data").unwrap_err();
+    assert_eq!(err.0, WRONG_PASSPHRASE);
+}
