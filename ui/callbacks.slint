@@ -65,6 +65,13 @@ export global Ui {
     in-out property <bool> browse-sign: false;
     in-out property <string> sign-file-name: "";
 
+    // Sign-QR flow: scan data with the system QR scanner, sign it, and show
+    // the armored signature as a QR code.
+    in-out property <bool> show-sign-qr-pass: false;
+    in-out property <bool> show-sign-qr-result: false;
+    in-out property <string> sign-qr-info: "";     // e.g. "142 bytes"
+    in-out property <image> sign-qr-image;
+
     // Shared modal fields.
     in-out property <string> field-a: "";         // days / name / old pass
     in-out property <string> field-b: "";         // email / new pass
@@ -116,4 +123,8 @@ export global Callbacks {
 
     callback start-sign();                        // open browser as sign-file picker
     callback sign-file(string);                   // passphrase (target staged in Rust)
+
+    callback start-sign-qr();                     // open the system QR scanner
+    callback sign-qr(string);                     // passphrase (data staged in Rust)
+    callback close-sign-qr();                     // dismiss the signature QR overlay
 }

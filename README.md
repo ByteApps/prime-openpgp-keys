@@ -37,6 +37,11 @@ identity.
   and write a detached binary OpenPGP signature next to it as `<file>.sig` —
   the same output as `gpg --detach-sign`, verifiable anywhere with
   `gpg --verify <file>.sig <file>`.
+- **Sign over QR** (secret keys): scan arbitrary data with the device camera
+  via the OS QR scanner — single QR codes or **multi-part animated UR**
+  (BC-UR, reassembled by the OS) — then the armored detached signature is
+  displayed as a QR code to scan back with your phone. A fully air-gapped
+  sign loop: data in by camera, signature out by screen.
 - **Export**: public-only or full secret key (behind a danger confirmation),
   to Internal or Airlock.
 - Keys live as one armored file per key in `/pgp-keys` on Internal storage —
@@ -83,18 +88,19 @@ nix develop ~/.foundation/sdk/current --command cargo test -p pgp-core   # host 
 ## Testing
 
 All OpenPGP logic lives in the UI-free **`pgp-core/`** subcrate so it can be
-tested on the host: 28 tests covering per-algorithm parsing against
+tested on the host: 29 tests covering per-algorithm parsing against
 gpg-generated fixtures, generation round-trips, every edit operation,
-detached-signing round-trips (with tamper rejection) across RSA, Ed25519,
-and NIST P-256, seed derivation determinism (uid/passphrase independence,
-index separation), and **GnuPG interop** — the suite shells out to a real
-`gpg` in a throwaway `GNUPGHOME` to prove our exports import, our edited
-keys verify, our rotated passphrases actually unlock signing, and our
-detached signatures come back `GOODSIG` from `gpg --verify` (skipped cleanly
-when gpg is absent). A workspace-level simulator UI test
-(`../ui-automation/tests/pgp-keychain.sh`, 15 steps) drives every flow through
-real taps and the on-screen keyboard, including signing a file and derive →
-delete → re-derive reproducing the same fingerprint.
+detached-signing round-trips (binary and armored, with tamper rejection)
+across RSA, Ed25519, and NIST P-256, seed derivation determinism
+(uid/passphrase independence, index separation), and **GnuPG interop** — the
+suite shells out to a real `gpg` in a throwaway `GNUPGHOME` to prove our
+exports import, our edited keys verify, our rotated passphrases actually
+unlock signing, and our detached signatures (both forms) come back `GOODSIG`
+from `gpg --verify` (skipped cleanly when gpg is absent). A workspace-level
+simulator UI test (`../ui-automation/tests/pgp-keychain.sh`, 16 steps) drives
+every flow through real taps and the on-screen keyboard, including signing a
+file, opening/cancelling the QR scanner (the hosted sim streams the real Mac
+webcam), and derive → delete → re-derive reproducing the same fingerprint.
 
 ## Permissions
 

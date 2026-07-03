@@ -533,6 +533,25 @@ pub fn sign_detached(
     pass: &str,
     data: &[u8],
 ) -> Result<Vec<u8>, PgpError> {
+    Ok(make_detached_signature(key, pass, data)?.to_bytes()?)
+}
+
+/// Detached ASCII-armored OpenPGP signature over `data` — the same shape
+/// `gpg --detach-sign --armor` writes to a `.asc` file. Text form, so it
+/// survives QR codes, e-mail, and copy/paste.
+pub fn sign_detached_armored(
+    key: &SignedSecretKey,
+    pass: &str,
+    data: &[u8],
+) -> Result<String, PgpError> {
+    Ok(make_detached_signature(key, pass, data)?.to_armored_string(ArmorOptions::default())?)
+}
+
+fn make_detached_signature(
+    key: &SignedSecretKey,
+    pass: &str,
+    data: &[u8],
+) -> Result<DetachedSignature, PgpError> {
     let pw = to_password(pass);
 
     let fpr = key.primary_key.fingerprint();
@@ -563,8 +582,7 @@ pub fn sign_detached(
     };
 
     let hash = signer.hash_alg();
-    let sig = DetachedSignature::sign_binary_data(thread_rng(), &signer, &pw, hash, data)?;
-    Ok(sig.to_bytes()?)
+    Ok(DetachedSignature::sign_binary_data(thread_rng(), &signer, &pw, hash, data)?)
 }
 
 // ---------------------------------------------------------------------------

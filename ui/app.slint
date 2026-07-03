@@ -436,12 +436,21 @@ component DetailView inherits VerticalLayout {
     }
     if Detail.has-secret: HorizontalLayout {
         height: 52px;
+        spacing: 10px;
         Button {
             full-width: true;
             variant: ButtonVariant.secondary;
             text: "Sign file";
             clicked => {
                 Callbacks.start-sign();
+            }
+        }
+        Button {
+            full-width: true;
+            variant: ButtonVariant.secondary;
+            text: "Sign QR";
+            clicked => {
+                Callbacks.start-sign-qr();
             }
         }
     }
@@ -923,6 +932,53 @@ export component AppWindow inherits Window {
             }
         }
 
+        // Sign QR-scanned data: confirm size + passphrase.
+        if Ui.show-sign-qr-pass: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Sign scanned data";
+            panel-height: 330px;
+            cancelled => {
+                Ui.show-sign-qr-pass = false;
+            }
+
+            Text {
+                text: "Sign " + Ui.sign-qr-info + " with " + Detail.title + "?";
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 15px;
+                wrap: word-wrap;
+            }
+            sign-qr-pass-input := Input {
+                label: "Passphrase";
+                placeholder: "Passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-pass;
+                submitted => {
+                    sign-qr-pass-input.clear-focus();
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-sign-qr-pass = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    text: "Sign";
+                    clicked => {
+                        Ui.show-sign-qr-pass = false;
+                        Callbacks.sign-qr(Ui.field-pass);
+                    }
+                }
+            }
+        }
+
         // Change passphrase: old + new.
         if Ui.show-change-pass: ModalPanel {
             width: 100%;
@@ -1072,6 +1128,51 @@ export component AppWindow inherits Window {
         }
 
         // Busy overlay (key generation) — topmost.
+        // Signature-as-QR result: white card so phone cameras lock on fast.
+        if Ui.show-sign-qr-result: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            TouchArea {} // swallow taps behind the card
+
+            VerticalLayout {
+                x: 28px;
+                width: parent.width - 56px;
+                alignment: center;
+                spacing: 16px;
+
+                Rectangle {
+                    height: self.width;
+                    background: white;
+                    border-radius: 12px;
+                    Image {
+                        width: parent.width - 32px;
+                        height: parent.height - 32px;
+                        source: Ui.sign-qr-image;
+                        image-rendering: pixelated;
+                    }
+                }
+                Text {
+                    text: "Scan with your phone to receive the armored signature (.asc)";
+                    color: white;
+                    font-family: "Montserrat";
+                    font-size: 15px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    height: 52px;
+                    Button {
+                        full-width: true;
+                        text: "Done";
+                        clicked => {
+                            Callbacks.close-sign-qr();
+                        }
+                    }
+                }
+            }
+        }
+
         if Ui.busy: Rectangle {
             width: 100%;
             height: 100%;

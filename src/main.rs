@@ -8,7 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use pgp_core::{KeyInfo, PgpKey};
 use slint_keyos_platform::app_ui;
 use slint_keyos_platform::fs::{self, Location, OpenFlags};
-use slint_keyos_platform::slint::{ComponentHandle, ModelRc, Timer, VecModel};
+use slint_keyos_platform::gui_server_api::navigation::qrscanner::{ScanQrOptions, ScanQrResult};
+use slint_keyos_platform::navigation::open_qr_scanner;
+use slint_keyos_platform::qrcode;
+use slint_keyos_platform::slint::{Color, ComponentHandle, ModelRc, Timer, VecModel};
 
 app_ui!("prime-pgp-keychain");
 security::use_api!();
@@ -31,6 +34,7 @@ struct State {
     import_path: String, // current import-browser directory, always starts with '/'
     sign_mode: bool,     // the import browser is picking a file to sign
     sign_target: Option<(String, Location)>, // picked file awaiting passphrase
+    sign_qr_data: Option<Vec<u8>>, // QR-scanned bytes awaiting passphrase
 }
 
 fn app_main(cx: AppContext, ui: AppWindow) {
@@ -47,6 +51,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         import_path: "/".to_string(),
         sign_mode: false,
         sign_target: None,
+        sign_qr_data: None,
     }));
 
     if let Err(e) = fs.create_dir(KEYS_DIR, Location::User) {
@@ -799,6 +804,105 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     }
                 }
             });
+        });
+    }
+
+    // --- Sign QR-scanned data (armored signature shown as a QR code) ---
+
+    {
+        let state = state.clone();
+        let ui_weak = ui_weak.clone();
+        callbacks.on_start_sign_qr(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if !state.borrow().current.as_ref().is_some_and(|c| c.key.has_secret()) {
+                return;
+            }
+            let opts = ScanQrOptions {
+                header_title: "Scan data to sign".into(),
+                message: "Point at a QR code (or animated UR) holding the data to sign".into(),
+                ..ScanQrOptions::default()
+            };
+            // Blocks while the system scanner modal owns the screen — the
+            // same synchronous pattern KeyOS's authenticator app uses.
+            let scanned = match open_qr_scanner::<gui_permissions::GuiPermissions>(opts) {
+                Ok(Some(ScanQrResult::Qr(data))) => data,
+                Ok(Some(ScanQrResult::Ur2(ur_type, data))) => {
+                    log::info!("cb: sign-qr scanned ur={ur_type}");
+                    data
+                }
+                Ok(_) => {
+                    log::info!("cb: sign-qr cancelled");
+                    return;
+                }
+                Err(e) => {
+                    log::info!("cb: sign-qr err=scanner {e:?}");
+                    show_error(&ui, format!("QR scanner unavailable: {e:?}"));
+                    return;
+                }
+            };
+            if scanned.is_empty() {
+                show_error(&ui, "Empty QR code".to_string());
+                return;
+            }
+            log::info!("cb: sign-qr scanned n={}", scanned.len());
+            let u = ui.global::<Ui>();
+            u.set_sign_qr_info(format!("{} scanned byte(s)", scanned.len()).into());
+            u.set_field_pass("".into());
+            u.set_show_sign_qr_pass(true);
+            state.borrow_mut().sign_qr_data = Some(scanned);
+        });
+    }
+
+    {
+        let state = state.clone();
+        let ui_weak = ui_weak.clone();
+        callbacks.on_sign_qr(move |pass| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(data) = state.borrow().sign_qr_data.clone() else { return };
+            let pass = pass.to_string();
+
+            let u = ui.global::<Ui>();
+            u.set_busy_text("Signing scanned data…".into());
+            u.set_busy(true);
+
+            let state = state.clone();
+            let ui_weak = ui_weak.clone();
+            Timer::single_shot(Duration::from_millis(150), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let result = with_secret_key(&state, |sk| {
+                    pgp_core::sign_detached_armored(sk, &pass, &data)
+                });
+                ui.global::<Ui>().set_busy(false);
+                match result {
+                    Ok(armored) => {
+                        log::info!("cb: sign-qr ok sig-chars={}", armored.len());
+                        let img = qrcode::render(
+                            armored.as_bytes(),
+                            Color::from_rgb_u8(0, 0, 0),
+                            Color::from_rgb_u8(255, 255, 255),
+                        );
+                        let u = ui.global::<Ui>();
+                        u.set_sign_qr_image(img);
+                        u.set_show_sign_qr_result(true);
+                        show_info(&ui, "");
+                    }
+                    Err(e) => {
+                        log::info!("cb: sign-qr err={e}");
+                        show_error(&ui, e);
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let state = state.clone();
+        let ui_weak = ui_weak.clone();
+        callbacks.on_close_sign_qr(move || {
+            state.borrow_mut().sign_qr_data = None;
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<Ui>().set_show_sign_qr_result(false);
+            }
         });
     }
 

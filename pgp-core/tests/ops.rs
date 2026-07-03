@@ -359,3 +359,21 @@ fn sign_detached_wrong_passphrase() {
     let err = sign_detached(&sk, "not-the-pass", b"data").unwrap_err();
     assert_eq!(err.0, WRONG_PASSPHRASE);
 }
+
+#[test]
+fn sign_detached_armored_roundtrip() {
+    use pgp::composed::{Deserializable, DetachedSignature};
+
+    let sk = secret("ed25519-cv25519-secret.asc");
+    let data = b"armored signing payload";
+    let armored = sign_detached_armored(&sk, PASS, data).unwrap();
+
+    assert!(armored.starts_with("-----BEGIN PGP SIGNATURE-----"));
+    assert!(armored.trim_end().ends_with("-----END PGP SIGNATURE-----"));
+
+    let (parsed, _) = DetachedSignature::from_string(&armored).unwrap();
+    parsed.verify(&sk.primary_key.public_key(), data).unwrap();
+    parsed
+        .verify(&sk.primary_key.public_key(), b"tampered payload")
+        .expect_err("tampered data verified");
+}

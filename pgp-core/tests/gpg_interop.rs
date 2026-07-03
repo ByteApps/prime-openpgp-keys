@@ -310,6 +310,23 @@ fn gpg_verifies_our_detached_signature() {
             b"",
         );
         assert!(!ok, "{name}: gpg accepted a tampered payload");
+
+        // the armored form (QR-friendly) must verify identically
+        std::fs::write(&data_path, data).unwrap();
+        let armored = sign_detached_armored(&sk, PASS, data).unwrap();
+        let asc_path = gpg.home.join(format!("{name}.payload.asc"));
+        std::fs::write(&asc_path, armored.as_bytes()).unwrap();
+        let (ok, out, err) = gpg.run(
+            &[
+                "--status-fd",
+                "1",
+                "--verify",
+                asc_path.to_str().unwrap(),
+                data_path.to_str().unwrap(),
+            ],
+            b"",
+        );
+        assert!(ok && out.contains("GOODSIG"), "{name}: armored verify failed: {out}{err}");
     }
 }
 
