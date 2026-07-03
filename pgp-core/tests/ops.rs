@@ -415,6 +415,21 @@ fn sign_encrypt_roundtrip() {
 }
 
 #[test]
+fn encrypt_output_is_compressed() {
+    // Highly compressible payload: if we stopped compressing, the ciphertext
+    // would be much larger than the deflated size.
+    let sk = secret("ed25519-cv25519-secret.asc");
+    let plain = vec![b'A'; 4096];
+    let cipher = encrypt_bytes(&PgpKey::Secret(sk.clone()), "t.txt", plain.clone(), None).unwrap();
+    assert!(
+        cipher.len() < 512,
+        "expected compressed ciphertext, got {} bytes for 4096 identical bytes",
+        cipher.len()
+    );
+    assert_eq!(decrypt_bytes(&sk, PASS, cipher).unwrap(), plain);
+}
+
+#[test]
 fn encrypt_sign_wrong_passphrase() {
     let sk = secret("rsa2048-secret.asc");
     let err = encrypt_bytes(

@@ -22,8 +22,8 @@ use pgp::packet::{
 };
 use pgp::ser::Serialize as _;
 use pgp::types::{
-    Duration as PgpDuration, Fingerprint, KeyDetails as _, KeyVersion, Password, PublicParams,
-    SignedUser, SigningKey, Timestamp,
+    CompressionAlgorithm, Duration as PgpDuration, Fingerprint, KeyDetails as _, KeyVersion,
+    Password, PublicParams, SignedUser, SigningKey, Timestamp,
 };
 use rand::thread_rng;
 use rsa::traits::PublicKeyParts;
@@ -629,6 +629,9 @@ pub fn encrypt_bytes(
     let mut rng = thread_rng();
     let mut builder = MessageBuilder::from_bytes(file_name.to_string(), data)
         .seipd_v1(&mut rng, SymmetricKeyAlgorithm::AES256);
+    // Compress before encrypting (ZLIB/DEFLATE), matching gpg's default —
+    // smaller output, and our decrypt already handles compressed messages.
+    builder.compression(CompressionAlgorithm::ZLIB);
     builder.encrypt_to_key(&mut rng, enc_key)?;
     if let Some((sk, pass)) = sign_with {
         let pw = to_password(pass);
