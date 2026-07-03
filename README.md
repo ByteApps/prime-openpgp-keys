@@ -42,6 +42,13 @@ identity.
   (BC-UR, reassembled by the OS) — then the armored detached signature is
   displayed as a QR code to scan back with your phone. A fully air-gapped
   sign loop: data in by camera, signature out by screen.
+- **Encrypt / decrypt files**: encrypt any file on Internal/Airlock/USB to a
+  key's encryption subkey, written next to it as `<file>.gpg` (binary
+  AES-256, exactly what `gpg -e` produces and `gpg -d` reads). Encrypt works
+  with any stored key — including public-only recipient keys — and an
+  optional "Also sign" toggle embeds a signature (secret keys, `gpg -se`
+  style). Decrypt (secret keys) accepts binary or armored input and restores
+  the original filename by stripping `.gpg`/`.pgp`/`.asc`.
 - **Export**: public-only or full secret key (behind a danger confirmation),
   to Internal or Airlock.
 - Keys live as one armored file per key in `/pgp-keys` on Internal storage —
@@ -88,19 +95,23 @@ nix develop ~/.foundation/sdk/current --command cargo test -p pgp-core   # host 
 ## Testing
 
 All OpenPGP logic lives in the UI-free **`pgp-core/`** subcrate so it can be
-tested on the host: 29 tests covering per-algorithm parsing against
+tested on the host: 37 tests covering per-algorithm parsing against
 gpg-generated fixtures, generation round-trips, every edit operation,
 detached-signing round-trips (binary and armored, with tamper rejection)
-across RSA, Ed25519, and NIST P-256, seed derivation determinism
-(uid/passphrase independence, index separation), and **GnuPG interop** — the
-suite shells out to a real `gpg` in a throwaway `GNUPGHOME` to prove our
-exports import, our edited keys verify, our rotated passphrases actually
-unlock signing, and our detached signatures (both forms) come back `GOODSIG`
-from `gpg --verify` (skipped cleanly when gpg is absent). A workspace-level
-simulator UI test (`../ui-automation/tests/pgp-keychain.sh`, 16 steps) drives
+across RSA, Ed25519, and NIST P-256, encrypt/decrypt round-trips (including
+public-key-encrypt → secret-decrypt and sign-then-encrypt), seed derivation
+determinism (uid/passphrase independence, index separation), and **GnuPG
+interop** — the suite shells out to a real `gpg` in a throwaway `GNUPGHOME`
+to prove our exports import, our edited keys verify, our rotated passphrases
+unlock signing, our detached signatures come back `GOODSIG` from
+`gpg --verify`, gpg decrypts our `.gpg` files (and we decrypt gpg's, binary
+and armored), and our sign-then-encrypt output shows `GOODSIG` under
+`gpg -d` (all skipped cleanly when gpg is absent). A workspace-level
+simulator UI test (`../ui-automation/tests/pgp-keychain.sh`, 18 steps) drives
 every flow through real taps and the on-screen keyboard, including signing a
-file, opening/cancelling the QR scanner (the hosted sim streams the real Mac
-webcam), and derive → delete → re-derive reproducing the same fingerprint.
+file, an encrypt → decrypt round-trip, opening/cancelling the QR scanner (the
+hosted sim streams the real Mac webcam), and derive → delete → re-derive
+reproducing the same fingerprint.
 
 ## Permissions
 

@@ -331,6 +331,84 @@ fn gpg_verifies_our_detached_signature() {
 }
 
 #[test]
+fn gpg_encrypts_we_decrypt() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let sk = fixture_secret("rsa2048-secret.asc");
+    let info = key_info(&PgpKey::Secret(sk.clone()));
+    gpg.import(&export_public_armored(&PgpKey::Secret(sk.clone())).unwrap());
+
+    let plain = b"gpg encrypted this for us\n";
+    let src = gpg.home.join("plain.txt");
+    std::fs::write(&src, plain).unwrap();
+
+    // Binary (-e) and armored (-ea): decrypt_bytes must accept both.
+    for (flags, out_name) in [(vec!["-e"], "c.gpg"), (vec!["-e", "-a"], "c.asc")] {
+        let out = gpg.home.join(out_name);
+        let mut args = vec!["--yes", "--trust-model", "always", "-r", info.key_id.as_str()];
+        args.extend(flags.iter().copied());
+        args.extend(["--output", out.to_str().unwrap(), src.to_str().unwrap()]);
+        let (ok, _, err) = gpg.run(&args, b"");
+        assert!(ok, "gpg encrypt ({out_name}) failed: {err}");
+
+        let cipher = std::fs::read(&out).unwrap();
+        let got = decrypt_bytes(&sk, PASS, cipher)
+            .unwrap_or_else(|e| panic!("decrypt of gpg {out_name} failed: {e}"));
+        assert_eq!(got, plain, "{out_name}: plaintext mismatch");
+    }
+}
+
+#[test]
+fn we_encrypt_gpg_decrypts() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let sk = fixture_secret("rsa2048-secret.asc");
+    gpg.import(&export_armored(&PgpKey::Secret(sk.clone())).unwrap());
+
+    let plain = b"we encrypted this for gpg\n".to_vec();
+    let cipher = encrypt_bytes(&PgpKey::Secret(sk.clone()), "t.txt", plain.clone(), None).unwrap();
+    let enc_path = gpg.home.join("ours.gpg");
+    std::fs::write(&enc_path, &cipher).unwrap();
+
+    let (ok, out, err) = gpg.run(
+        &["--passphrase", PASS, "--decrypt", enc_path.to_str().unwrap()],
+        b"",
+    );
+    assert!(ok, "gpg -d of our message failed: {err}");
+    assert_eq!(out.as_bytes(), &plain[..], "gpg-decrypted plaintext mismatch");
+}
+
+#[test]
+fn we_sign_encrypt_gpg_goodsig() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let sk = fixture_secret("ed25519-cv25519-secret.asc");
+    gpg.import(&export_armored(&PgpKey::Secret(sk.clone())).unwrap());
+
+    let plain = b"signed inside the envelope\n".to_vec();
+    let cipher = encrypt_bytes(
+        &PgpKey::Secret(sk.clone()),
+        "t.txt",
+        plain.clone(),
+        Some((&sk, PASS)),
+    )
+    .unwrap();
+    let enc_path = gpg.home.join("ours-se.gpg");
+    std::fs::write(&enc_path, &cipher).unwrap();
+
+    let (ok, out, err) = gpg.run(
+        &["--passphrase", PASS, "--status-fd", "1", "--decrypt", enc_path.to_str().unwrap()],
+        b"",
+    );
+    assert!(ok, "gpg -d of our signed+encrypted message failed: {err}");
+    assert!(out.contains("GOODSIG"), "no GOODSIG in gpg output: {out}");
+    assert!(
+        out.contains("signed inside the envelope"),
+        "plaintext missing from gpg output: {out}"
+    );
+}
+
+#[test]
 fn we_import_every_gpg_generated_algorithm() {
     // The reverse direction of the interop story: keys born in gpg parse
     // through pgp-core. (No gpg needed at runtime — fixtures are committed —

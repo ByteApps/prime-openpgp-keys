@@ -12,10 +12,11 @@ use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use pgp::composed::{
-    ArmorOptions, DetachedSignature, EncryptionCaps, KeyType, PublicOrSecret,
-    SecretKeyParamsBuilder, SubkeyParamsBuilder,
+    ArmorOptions, DetachedSignature, EncryptionCaps, KeyType, Message, MessageBuilder,
+    PublicOrSecret, SecretKeyParamsBuilder, SubkeyParamsBuilder,
 };
 use pgp::crypto::ecc_curve::ECCCurve;
+use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use pgp::packet::{
     PacketTrait, Signature, SignatureConfig, SignatureType, Subpacket, SubpacketData, UserId,
 };
@@ -547,26 +548,25 @@ pub fn sign_detached_armored(
     Ok(make_detached_signature(key, pass, data)?.to_armored_string(ArmorOptions::default())?)
 }
 
-fn make_detached_signature(
-    key: &SignedSecretKey,
-    pass: &str,
-    data: &[u8],
-) -> Result<DetachedSignature, PgpError> {
-    let pw = to_password(pass);
-
+/// Pick the signing component key — the primary when its newest self-cert
+/// carries the sign flag (all keys this app generates do), otherwise the
+/// newest signing-capable secret subkey — and unlock it so a bad passphrase
+/// surfaces as WRONG_PASSPHRASE instead of an opaque signing error.
+fn select_signer<'a>(
+    key: &'a SignedSecretKey,
+    pw: &Password,
+) -> Result<Box<&'a dyn SigningKey>, PgpError> {
     let fpr = key.primary_key.fingerprint();
     let key_id = key.primary_key.legacy_key_id();
     let primary_signs = latest_self_cert(&key.details.users, &fpr, &key_id)
         .map_or(true, |sig| sig.key_flags().sign());
 
-    // Unlock explicitly first so a bad passphrase surfaces as
-    // WRONG_PASSPHRASE instead of an opaque signing error.
-    let signer: Box<&dyn SigningKey> = if primary_signs {
+    if primary_signs {
         key.primary_key
-            .unlock(&pw, |_, _| Ok(()))
+            .unlock(pw, |_, _| Ok(()))
             .map_err(wrong_pw)?
             .map_err(|e| PgpError(e.to_string()))?;
-        Box::new(&key.primary_key)
+        Ok(Box::new(&key.primary_key))
     } else {
         let sub = key
             .secret_subkeys
@@ -575,14 +575,108 @@ fn make_detached_signature(
             .max_by_key(|s| s.key.created_at().as_secs())
             .ok_or_else(|| PgpError("Key has no signing-capable secret key".into()))?;
         sub.key
-            .unlock(&pw, |_, _| Ok(()))
+            .unlock(pw, |_, _| Ok(()))
             .map_err(wrong_pw)?
             .map_err(|e| PgpError(e.to_string()))?;
-        Box::new(&sub.key)
-    };
+        Ok(Box::new(&sub.key))
+    }
+}
 
+fn make_detached_signature(
+    key: &SignedSecretKey,
+    pass: &str,
+    data: &[u8],
+) -> Result<DetachedSignature, PgpError> {
+    let pw = to_password(pass);
+    let signer = select_signer(key, &pw)?;
     let hash = signer.hash_alg();
     Ok(DetachedSignature::sign_binary_data(thread_rng(), &signer, &pw, hash, data)?)
+}
+
+// ---------------------------------------------------------------------------
+// Encryption / decryption
+// ---------------------------------------------------------------------------
+
+/// Encrypt `data` to `recipient`'s encryption subkey as a binary OpenPGP
+/// message (AES-256, SEIPDv1, uncompressed) — what `gpg -e` produces and
+/// `gpg -d` reads. Needs only public key material.
+///
+/// `sign_with: Some((key, pass))` additionally signs inside the encrypted
+/// container (one-pass signature, like `gpg -se`).
+pub fn encrypt_bytes(
+    recipient: &PgpKey,
+    file_name: &str,
+    data: Vec<u8>,
+    sign_with: Option<(&SignedSecretKey, &str)>,
+) -> Result<Vec<u8>, PgpError> {
+    let owned_pk;
+    let pk: &SignedPublicKey = match recipient {
+        PgpKey::Public(p) => p,
+        PgpKey::Secret(s) => {
+            owned_pk = s.to_public_key();
+            &owned_pk
+        }
+    };
+    // Encrypt to the encryption-capable subkey. Passing the whole
+    // SignedPublicKey would encrypt to the sign/certify-only PRIMARY key —
+    // producing a message the recipient can never decrypt.
+    let enc_key = pk
+        .public_subkeys
+        .iter()
+        .find(|s| s.algorithm().can_encrypt())
+        .ok_or_else(|| PgpError("Key has no encryption subkey".into()))?;
+
+    let mut rng = thread_rng();
+    let mut builder = MessageBuilder::from_bytes(file_name.to_string(), data)
+        .seipd_v1(&mut rng, SymmetricKeyAlgorithm::AES256);
+    builder.encrypt_to_key(&mut rng, enc_key)?;
+    if let Some((sk, pass)) = sign_with {
+        let pw = to_password(pass);
+        let signer = select_signer(sk, &pw)?;
+        let hash = signer.hash_alg();
+        builder.sign(*signer, pw, hash);
+    }
+    Ok(builder.to_vec(&mut rng)?)
+}
+
+/// Decrypt a binary or armored OpenPGP message with the key's encryption
+/// subkey. Wrong passphrase surfaces as WRONG_PASSPHRASE; malformed input
+/// returns an error instead of panicking.
+pub fn decrypt_bytes(
+    key: &SignedSecretKey,
+    pass: &str,
+    data: Vec<u8>,
+) -> Result<Vec<u8>, PgpError> {
+    let pw = to_password(pass);
+
+    // Pre-flight unlock: Message::decrypt reports MissingKey for both a
+    // wrong passphrase and a message for someone else, so distinguish the
+    // passphrase failure here (primary fallback covers imported
+    // encrypt-capable primaries with no subkey).
+    match key
+        .secret_subkeys
+        .iter()
+        .find(|s| s.key.algorithm().can_encrypt())
+    {
+        Some(sub) => sub.key.unlock(&pw, |_, _| Ok(())),
+        None => key.primary_key.unlock(&pw, |_, _| Ok(())),
+    }
+    .map_err(wrong_pw)?
+    .map_err(|e| PgpError(e.to_string()))?;
+
+    catch_unwind(AssertUnwindSafe(move || -> Result<Vec<u8>, PgpError> {
+        // from_reader auto-detects binary vs armored input.
+        let (msg, _headers) = Message::from_reader(Cursor::new(data))?;
+        let mut msg = msg.decrypt(&pw, key)?;
+        // gpg compresses by default (ZIP/ZLIB — flate2 is always built).
+        while msg.is_compressed() {
+            msg = msg.decompress()?;
+        }
+        // Reads the literal data through a Signed layer transparently.
+        msg.as_data_vec()
+            .map_err(|e| PgpError(format!("Could not read decrypted data: {e}")))
+    }))
+    .map_err(|_| PgpError("Malformed OpenPGP message (parser crashed)".into()))?
 }
 
 // ---------------------------------------------------------------------------

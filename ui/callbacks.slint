@@ -60,10 +60,14 @@ export global Ui {
     in-out property <bool> show-export-secret-confirm: false;
     in-out property <bool> show-delete: false;     // delete confirmation
     in-out property <bool> show-sign-pass: false;  // sign-file passphrase
+    in-out property <bool> show-encrypt-modal: false; // encrypt confirm (+optional sign)
+    in-out property <bool> show-decrypt-pass: false;  // decrypt passphrase
 
-    // Sign-file flow: the import browser doubles as the file picker.
-    in-out property <bool> browse-sign: false;
-    in-out property <string> sign-file-name: "";
+    // The import browser doubles as a generic file picker.
+    // 0 = import (.asc only), 1 = sign, 2 = encrypt, 3 = decrypt (all files).
+    in-out property <int> browse-mode: 0;
+    in-out property <string> sign-file-name: "";   // picked file, shown in modals
+    in-out property <bool> encrypt-sign: false;    // "Also sign" toggle state
 
     // Sign-QR flow: scan data with the system QR scanner, sign it, and show
     // the armored signature as a QR code.
@@ -123,6 +127,11 @@ export global Callbacks {
 
     callback start-sign();                        // open browser as sign-file picker
     callback sign-file(string);                   // passphrase (target staged in Rust)
+
+    callback start-encrypt();                     // open browser as encrypt picker
+    callback encrypt-file(bool, string);          // also-sign?, passphrase ("" if not signing)
+    callback start-decrypt();                     // open browser as decrypt picker
+    callback decrypt-file(string);                // passphrase (target staged in Rust)
 
     callback start-sign-qr();                     // open the system QR scanner
     callback sign-qr(string);                     // passphrase (data staged in Rust)

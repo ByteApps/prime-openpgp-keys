@@ -360,6 +360,89 @@ fn sign_detached_wrong_passphrase() {
     assert_eq!(err.0, WRONG_PASSPHRASE);
 }
 
+// ---------------------------------------------------------------------------
+// Encryption / decryption
+// ---------------------------------------------------------------------------
+
+#[test]
+fn encrypt_decrypt_roundtrip_all_algorithms() {
+    // dsa-elgamal is excluded: rpgp does not implement ElGamal encryption
+    // (legacy algorithm, dropped from RFC 9580) — see the test below.
+    for name in ["rsa2048", "rsa4096", "ed25519-cv25519", "nistp256"] {
+        let sk = secret(&format!("{name}-secret.asc"));
+        let plain = format!("roundtrip payload for {name}").into_bytes();
+
+        let cipher = encrypt_bytes(&PgpKey::Secret(sk.clone()), "t.txt", plain.clone(), None)
+            .unwrap_or_else(|e| panic!("{name}: encrypt failed: {e}"));
+        assert!(!cipher.starts_with(b"-----"), "{name}: output is armored");
+        assert_ne!(cipher, plain, "{name}: output not encrypted");
+
+        let out = decrypt_bytes(&sk, PASS, cipher)
+            .unwrap_or_else(|e| panic!("{name}: decrypt failed: {e}"));
+        assert_eq!(out, plain, "{name}: plaintext mismatch");
+    }
+}
+
+#[test]
+fn encrypt_to_elgamal_is_clean_error() {
+    // rpgp can parse/sign-with DSA+ElGamal keys but cannot encrypt to the
+    // ElGamal subkey; the app surfaces this as an error banner.
+    let sk = secret("dsa-elgamal-secret.asc");
+    let err = encrypt_bytes(&PgpKey::Secret(sk), "t.txt", b"data".to_vec(), None).unwrap_err();
+    assert!(err.0.to_lowercase().contains("elgamal"), "unexpected error: {err}");
+}
+
+#[test]
+fn encrypt_with_public_only_key() {
+    let sk = secret("ed25519-cv25519-secret.asc");
+    let public = parse_one("ed25519-cv25519-public.asc");
+    assert!(!public.has_secret());
+
+    let plain = b"to a public-only recipient".to_vec();
+    let cipher = encrypt_bytes(&public, "t.txt", plain.clone(), None).unwrap();
+    assert_eq!(decrypt_bytes(&sk, PASS, cipher).unwrap(), plain);
+}
+
+#[test]
+fn sign_encrypt_roundtrip() {
+    let sk = secret("rsa2048-secret.asc");
+    let plain = b"signed and encrypted".to_vec();
+
+    let cipher =
+        encrypt_bytes(&PgpKey::Secret(sk.clone()), "t.txt", plain.clone(), Some((&sk, PASS)))
+            .unwrap();
+    assert_eq!(decrypt_bytes(&sk, PASS, cipher).unwrap(), plain);
+}
+
+#[test]
+fn encrypt_sign_wrong_passphrase() {
+    let sk = secret("rsa2048-secret.asc");
+    let err = encrypt_bytes(
+        &PgpKey::Secret(sk.clone()),
+        "t.txt",
+        b"data".to_vec(),
+        Some((&sk, "not-the-pass")),
+    )
+    .unwrap_err();
+    assert_eq!(err.0, WRONG_PASSPHRASE);
+}
+
+#[test]
+fn decrypt_wrong_passphrase() {
+    let sk = secret("rsa2048-secret.asc");
+    let cipher =
+        encrypt_bytes(&PgpKey::Secret(sk.clone()), "t.txt", b"data".to_vec(), None).unwrap();
+    let err = decrypt_bytes(&sk, "not-the-pass", cipher).unwrap_err();
+    assert_eq!(err.0, WRONG_PASSPHRASE);
+}
+
+#[test]
+fn decrypt_garbage_no_panic() {
+    let sk = secret("rsa2048-secret.asc");
+    assert!(decrypt_bytes(&sk, PASS, b"this is not an openpgp message".to_vec()).is_err());
+    assert!(decrypt_bytes(&sk, PASS, vec![0xC3, 0x01, 0xFF, 0x00]).is_err());
+}
+
 #[test]
 fn sign_detached_armored_roundtrip() {
     use pgp::composed::{Deserializable, DetachedSignature};

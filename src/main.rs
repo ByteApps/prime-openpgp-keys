@@ -27,13 +27,34 @@ struct CurrentKey {
     info: KeyInfo,
 }
 
+/// What the file browser (screen 2) is currently picking a file for.
+/// Values mirror `Ui.browse-mode`: 0/1/2/3.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowseMode {
+    Import,
+    SignFile,
+    Encrypt,
+    Decrypt,
+}
+
+impl BrowseMode {
+    fn ui_index(self) -> i32 {
+        match self {
+            BrowseMode::Import => 0,
+            BrowseMode::SignFile => 1,
+            BrowseMode::Encrypt => 2,
+            BrowseMode::Decrypt => 3,
+        }
+    }
+}
+
 /// Mutable app state shared across the UI callbacks.
 struct State {
     current: Option<CurrentKey>,
     import_location: Location,
     import_path: String, // current import-browser directory, always starts with '/'
-    sign_mode: bool,     // the import browser is picking a file to sign
-    sign_target: Option<(String, Location)>, // picked file awaiting passphrase
+    browse_mode: BrowseMode,
+    browse_target: Option<(String, Location)>, // picked file awaiting confirm/passphrase
     sign_qr_data: Option<Vec<u8>>, // QR-scanned bytes awaiting passphrase
 }
 
@@ -49,8 +70,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         current: None,
         import_location: Location::User,
         import_path: "/".to_string(),
-        sign_mode: false,
-        sign_target: None,
+        browse_mode: BrowseMode::Import,
+        browse_target: None,
         sign_qr_data: None,
     }));
 
@@ -136,9 +157,9 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let ui_weak = ui_weak.clone();
         Rc::new(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let (loc, path, sign_mode) = {
+            let (loc, path, mode) = {
                 let s = state.borrow();
-                (s.import_location, s.import_path.clone(), s.sign_mode)
+                (s.import_location, s.import_path.clone(), s.browse_mode)
             };
             let browser = ui.global::<Browser>();
 
@@ -161,7 +182,9 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                             }
                             if entry.is_dir {
                                 items.push((true, entry.name, "Folder".to_string()));
-                            } else if sign_mode || entry.name.to_lowercase().ends_with(".asc") {
+                            } else if mode != BrowseMode::Import
+                                || entry.name.to_lowercase().ends_with(".asc")
+                            {
                                 let size = human_size(entry.len);
                                 items.push((false, entry.name, size));
                             }
@@ -230,44 +253,40 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let state = state.clone();
         let ui_weak = ui_weak.clone();
         let refresh_import = refresh_import.clone();
-        callbacks.on_start_import(move || {
-            {
-                let mut s = state.borrow_mut();
-                s.import_location = Location::User;
-                s.import_path = "/".to_string();
-                s.sign_mode = false;
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                show_info(&ui, "");
-                ui.global::<Browser>().set_location_index(0);
-                ui.global::<Ui>().set_browse_sign(false);
-                ui.global::<Ui>().set_screen(2);
-            }
-            refresh_import();
-        });
-    }
+        let open_browser: Rc<dyn Fn(BrowseMode)> = {
+            let state = state.clone();
+            let ui_weak = ui_weak.clone();
+            Rc::new(move |mode: BrowseMode| {
+                {
+                    let mut s = state.borrow_mut();
+                    s.import_location = Location::User;
+                    s.import_path = "/".to_string();
+                    s.browse_mode = mode;
+                    s.browse_target = None;
+                }
+                if let Some(ui) = ui_weak.upgrade() {
+                    show_info(&ui, "");
+                    ui.global::<Browser>().set_location_index(0);
+                    ui.global::<Ui>().set_browse_mode(mode.ui_index());
+                    ui.global::<Ui>().set_screen(2);
+                }
+                refresh_import();
+            })
+        };
 
-    // Open the same browser as a pick-any-file-to-sign dialog.
-    {
-        let state = state.clone();
-        let ui_weak = ui_weak.clone();
-        let refresh_import = refresh_import.clone();
-        callbacks.on_start_sign(move || {
-            {
-                let mut s = state.borrow_mut();
-                s.import_location = Location::User;
-                s.import_path = "/".to_string();
-                s.sign_mode = true;
-                s.sign_target = None;
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                show_info(&ui, "");
-                ui.global::<Browser>().set_location_index(0);
-                ui.global::<Ui>().set_browse_sign(true);
-                ui.global::<Ui>().set_screen(2);
-            }
-            refresh_import();
-        });
+        {
+            let open_browser = open_browser.clone();
+            callbacks.on_start_import(move || open_browser(BrowseMode::Import));
+        }
+        {
+            let open_browser = open_browser.clone();
+            callbacks.on_start_sign(move || open_browser(BrowseMode::SignFile));
+        }
+        {
+            let open_browser = open_browser.clone();
+            callbacks.on_start_encrypt(move || open_browser(BrowseMode::Encrypt));
+        }
+        callbacks.on_start_decrypt(move || open_browser(BrowseMode::Decrypt));
     }
 
     {
@@ -300,20 +319,21 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let ui_weak = ui_weak.clone();
         let refresh_keys = refresh_keys.clone();
         callbacks.on_cancel_import(move || {
-            let was_sign = {
+            let from_detail = {
                 let mut s = state.borrow_mut();
-                let was = s.sign_mode;
-                s.sign_mode = false;
-                s.sign_target = None;
+                let was = s.browse_mode != BrowseMode::Import;
+                s.browse_mode = BrowseMode::Import;
+                s.browse_target = None;
                 was
             };
             if let Some(ui) = ui_weak.upgrade() {
                 show_info(&ui, "");
-                ui.global::<Ui>().set_browse_sign(false);
-                // Sign picking starts from the key detail screen; return there.
-                ui.global::<Ui>().set_screen(if was_sign { 1 } else { 0 });
+                ui.global::<Ui>().set_browse_mode(0);
+                // Sign/encrypt/decrypt picking starts from the key detail
+                // screen; return there. Import returns to the list.
+                ui.global::<Ui>().set_screen(if from_detail { 1 } else { 0 });
             }
-            if !was_sign {
+            if !from_detail {
                 refresh_keys();
             }
         });
@@ -341,12 +361,21 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 return;
             }
 
-            if state.borrow().sign_mode {
-                state.borrow_mut().sign_target = Some((full, loc));
+            let mode = state.borrow().browse_mode;
+            if mode != BrowseMode::Import {
+                state.borrow_mut().browse_target = Some((full, loc));
                 let u = ui.global::<Ui>();
                 u.set_sign_file_name(name.clone());
                 u.set_field_pass("".into());
-                u.set_show_sign_pass(true);
+                match mode {
+                    BrowseMode::SignFile => u.set_show_sign_pass(true),
+                    BrowseMode::Encrypt => {
+                        u.set_encrypt_sign(false);
+                        u.set_show_encrypt_modal(true);
+                    }
+                    BrowseMode::Decrypt => u.set_show_decrypt_pass(true),
+                    BrowseMode::Import => unreachable!(),
+                }
                 return;
             }
 
@@ -757,7 +786,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let ui_weak = ui_weak.clone();
         callbacks.on_sign_file(move |pass| {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let Some((path, loc)) = state.borrow().sign_target.clone() else { return };
+            let Some((path, loc)) = state.borrow().browse_target.clone() else { return };
             let pass = pass.to_string();
 
             let u = ui.global::<Ui>();
@@ -791,8 +820,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 match result {
                     Ok(()) => {
                         log::info!("cb: sign-file {name} ok path={sig_path} loc={loc_name}");
-                        state.borrow_mut().sign_mode = false;
-                        ui.global::<Ui>().set_browse_sign(false);
+                        state.borrow_mut().browse_mode = BrowseMode::Import;
+                        ui.global::<Ui>().set_browse_mode(0);
                         ui.global::<Ui>().set_screen(1);
                         show_info(&ui, &format!("Signature written: {sig_path}"));
                     }
@@ -800,6 +829,119 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                         // Stay on the browser so the user can retry (e.g.
                         // wrong passphrase, USB unplugged mid-flow).
                         log::info!("cb: sign-file {name} err={e}");
+                        show_error(&ui, e);
+                    }
+                }
+            });
+        });
+    }
+
+    // --- Encrypt / decrypt (output written next to the input) ---
+
+    {
+        let fs = fs.clone();
+        let state = state.clone();
+        let ui_weak = ui_weak.clone();
+        callbacks.on_encrypt_file(move |sign, pass| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some((path, loc)) = state.borrow().browse_target.clone() else { return };
+            let pass = pass.to_string();
+
+            let u = ui.global::<Ui>();
+            u.set_busy_text("Encrypting file…".into());
+            u.set_busy(true);
+
+            let fs = fs.clone();
+            let state = state.clone();
+            let ui_weak = ui_weak.clone();
+            Timer::single_shot(Duration::from_millis(150), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let out_path = format!("{path}.gpg");
+                let loc_name = loc_name(loc);
+                let result = read_bytes(&fs, &path, loc)
+                    .and_then(|data| {
+                        let s = state.borrow();
+                        let cur = s.current.as_ref().ok_or("No key open")?;
+                        let sign_with = if sign {
+                            match &cur.key {
+                                PgpKey::Secret(sk) => Some((sk, pass.as_str())),
+                                PgpKey::Public(_) => {
+                                    return Err("Cannot sign: no secret key".to_string())
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        pgp_core::encrypt_bytes(&cur.key, &name, data, sign_with)
+                            .map_err(|e| e.0)
+                    })
+                    .and_then(|cipher| {
+                        fs.open_file(out_path.as_str(), loc, OpenFlags::CREATE)
+                            .and_then(|mut f| f.overwrite(&cipher))
+                            .map_err(|e| err_msg(&e))
+                    });
+                ui.global::<Ui>().set_busy(false);
+                match result {
+                    Ok(()) => {
+                        log::info!(
+                            "cb: encrypt-file {name} ok path={out_path} loc={loc_name} sign={sign}"
+                        );
+                        state.borrow_mut().browse_mode = BrowseMode::Import;
+                        ui.global::<Ui>().set_browse_mode(0);
+                        ui.global::<Ui>().set_screen(1);
+                        show_info(&ui, &format!("Encrypted: {out_path}"));
+                    }
+                    Err(e) => {
+                        log::info!("cb: encrypt-file {name} err={e}");
+                        show_error(&ui, e);
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let fs = fs.clone();
+        let state = state.clone();
+        let ui_weak = ui_weak.clone();
+        callbacks.on_decrypt_file(move |pass| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some((path, loc)) = state.borrow().browse_target.clone() else { return };
+            let pass = pass.to_string();
+
+            let u = ui.global::<Ui>();
+            u.set_busy_text("Decrypting file…".into());
+            u.set_busy(true);
+
+            let fs = fs.clone();
+            let state = state.clone();
+            let ui_weak = ui_weak.clone();
+            Timer::single_shot(Duration::from_millis(150), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let out_path = strip_pgp_ext(&path);
+                let loc_name = loc_name(loc);
+                let result = read_bytes(&fs, &path, loc)
+                    .and_then(|data| {
+                        with_secret_key(&state, |sk| pgp_core::decrypt_bytes(sk, &pass, data))
+                    })
+                    .and_then(|plain| {
+                        fs.open_file(out_path.as_str(), loc, OpenFlags::CREATE)
+                            .and_then(|mut f| f.overwrite(&plain))
+                            .map_err(|e| err_msg(&e))
+                    });
+                ui.global::<Ui>().set_busy(false);
+                match result {
+                    Ok(()) => {
+                        log::info!("cb: decrypt-file {name} ok path={out_path} loc={loc_name}");
+                        state.borrow_mut().browse_mode = BrowseMode::Import;
+                        ui.global::<Ui>().set_browse_mode(0);
+                        ui.global::<Ui>().set_screen(1);
+                        show_info(&ui, &format!("Decrypted: {out_path}"));
+                    }
+                    Err(e) => {
+                        log::info!("cb: decrypt-file {name} err={e}");
                         show_error(&ui, e);
                     }
                 }
@@ -930,6 +1072,29 @@ fn save_key(fs: &Fs, key: &PgpKey) -> Result<String, String> {
         .and_then(|mut f| f.overwrite(armored.as_bytes()))
         .map_err(|e| err_msg(&e))?;
     Ok(filename)
+}
+
+fn loc_name(loc: Location) -> &'static str {
+    match loc {
+        Location::Airlock => "airlock",
+        Location::Usb => "usb",
+        _ => "internal",
+    }
+}
+
+/// Output path for a decrypted file: strip a trailing .gpg/.pgp/.asc,
+/// otherwise append .out — never equal to the input path.
+fn strip_pgp_ext(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    for ext in [".gpg", ".pgp", ".asc"] {
+        if lower.ends_with(ext) {
+            let stem = &path[..path.len() - ext.len()];
+            if !stem.is_empty() && !stem.ends_with('/') {
+                return stem.to_string();
+            }
+        }
+    }
+    format!("{path}.out")
 }
 
 /// Run an op against the current key, which must have secret material.

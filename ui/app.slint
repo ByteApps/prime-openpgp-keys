@@ -5,6 +5,7 @@ import { Icon } from "@ui/icon.slint";
 import { Input } from "@ui/input.slint";
 import { SegmentedControl } from "@ui/segmented_control.slint";
 import { Dialog, DialogVariant } from "@ui/dialog.slint";
+import { Checkbox } from "@ui/checkbox.slint";
 
 export { Callbacks, KeyList, Detail, Browser, Ui, KeyRow, DetailRow, FileRow, Theme }
 
@@ -454,6 +455,26 @@ component DetailView inherits VerticalLayout {
             }
         }
     }
+    HorizontalLayout {
+        height: 52px;
+        spacing: 10px;
+        Button {
+            full-width: true;
+            variant: ButtonVariant.secondary;
+            text: "Encrypt";
+            clicked => {
+                Callbacks.start-encrypt();
+            }
+        }
+        if Detail.has-secret: Button {
+            full-width: true;
+            variant: ButtonVariant.secondary;
+            text: "Decrypt";
+            clicked => {
+                Callbacks.start-decrypt();
+            }
+        }
+    }
 }
 
 // The import file browser screen.
@@ -472,7 +493,10 @@ component ImportView inherits VerticalLayout {
         Text {
             vertical-alignment: center;
             horizontal-stretch: 1;
-            text: Ui.browse-sign ? "Choose file to sign" : "Import key (.asc)";
+            text: Ui.browse-mode == 1 ? "Choose file to sign"
+                : Ui.browse-mode == 2 ? "Choose file to encrypt"
+                : Ui.browse-mode == 3 ? "Choose file to decrypt"
+                : "Import key (.asc)";
             color: Theme.palette-foreground;
             font-family: "Montserrat";
             font-size: 18px;
@@ -974,6 +998,104 @@ export component AppWindow inherits Window {
                     clicked => {
                         Ui.show-sign-qr-pass = false;
                         Callbacks.sign-qr(Ui.field-pass);
+                    }
+                }
+            }
+        }
+
+        // Encrypt file: confirm target, optional inner signature.
+        if Ui.show-encrypt-modal: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Encrypt file";
+            panel-height: Ui.encrypt-sign ? 430px : 330px;
+            cancelled => {
+                Ui.show-encrypt-modal = false;
+            }
+
+            Text {
+                text: "Encrypt \"" + Ui.sign-file-name + "\" for " + Detail.title + "?";
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 15px;
+                wrap: word-wrap;
+            }
+            if Detail.has-secret: Checkbox {
+                label: "Also sign (needs passphrase)";
+                checked <=> Ui.encrypt-sign;
+            }
+            if Ui.encrypt-sign: encrypt-pass-input := Input {
+                label: "Passphrase";
+                placeholder: "Passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-pass;
+                submitted => {
+                    encrypt-pass-input.clear-focus();
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-encrypt-modal = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    text: "Encrypt";
+                    clicked => {
+                        Ui.show-encrypt-modal = false;
+                        Callbacks.encrypt-file(Ui.encrypt-sign, Ui.field-pass);
+                    }
+                }
+            }
+        }
+
+        // Decrypt file: confirm target + passphrase.
+        if Ui.show-decrypt-pass: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Decrypt file";
+            panel-height: 330px;
+            cancelled => {
+                Ui.show-decrypt-pass = false;
+            }
+
+            Text {
+                text: "Decrypt \"" + Ui.sign-file-name + "\" with " + Detail.title + "?";
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 15px;
+                wrap: word-wrap;
+            }
+            decrypt-pass-input := Input {
+                label: "Passphrase";
+                placeholder: "Passphrase";
+                input-type: InputType.password;
+                value <=> Ui.field-pass;
+                submitted => {
+                    decrypt-pass-input.clear-focus();
+                }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    full-width: true;
+                    variant: ButtonVariant.secondary;
+                    text: "Cancel";
+                    clicked => {
+                        Ui.show-decrypt-pass = false;
+                    }
+                }
+                Button {
+                    full-width: true;
+                    text: "Decrypt";
+                    clicked => {
+                        Ui.show-decrypt-pass = false;
+                        Callbacks.decrypt-file(Ui.field-pass);
                     }
                 }
             }
