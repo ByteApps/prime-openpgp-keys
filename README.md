@@ -1,4 +1,4 @@
-# PGP Keychain — a Passport Prime app
+# <img src="resources/icon.svg" alt="" width="42" align="top" /> PGP Keychain — a Passport Prime app
 
 An OpenPGP key manager for Foundation's **Passport Prime**, built as a Rust
 binary with a **Slint** UI on **KeyOS** (Foundation's Rust microkernel on
