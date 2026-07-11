@@ -145,3 +145,26 @@ then customized. Normally checked out as a git submodule of a `prime/`
 workspace (alongside a local KeyOS docs knowledge base); it also builds
 standalone. Verified: signed hardware build (10.9 MB), full simulator UI test
 run, and gpg cross-validation — see `NOTES.md`.
+
+## License & disclaimer
+
+Licensed under the GNU General Public License v3.0 or later — see [COPYING](COPYING). Sections 15–17 of that license disclaim all warranty and limit liability; the notes below restate that in plain language.
+
+This is experimental software and it has **not been independently audited**.
+It is provided **"as is", without warranty of any kind**, express or implied,
+including but not limited to the warranties of merchantability, fitness for a
+particular purpose, and non-infringement.
+
+**Use it at your own risk.** To the maximum extent permitted by law, in no
+event shall the authors, copyright holders, or contributors be liable for any
+claim, damages, or other liability — including, without limitation,
+**loss of keys, loss of encrypted data, or any other loss of data** — whether in an action of contract, tort, or
+otherwise, arising from, out of, or in connection with this software or its
+use.
+
+Nothing in this project is financial, investment, legal, or tax advice. You
+are solely responsible for verifying addresses, amounts, fees, and backups
+before moving funds, and for complying with the laws of your jurisdiction.
+Test on test networks, or with amounts you can afford to lose, first.
+
+If a private key is lost, or its passphrase forgotten, **data encrypted to it is unrecoverable** — there is no reset or recovery service. Verify key fingerprints out-of-band before trusting an imported key or encrypting to it.
