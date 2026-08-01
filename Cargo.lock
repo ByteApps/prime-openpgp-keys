@@ -4667,11 +4667,13 @@ dependencies = [
 name = "pgp-core"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.10",
  "hkdf",
  "pgp",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "rsa",
+ "serde_json",
  "sha2",
 ]
 
