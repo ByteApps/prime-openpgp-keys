@@ -6,14 +6,14 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pgp_core::{KeyInfo, PgpKey};
-use slint_keyos_platform::app_ui;
+use slint_keyos_platform::app_ui2;
 use slint_keyos_platform::fs::{self, Location, OpenFlags};
 use slint_keyos_platform::gui_server_api::navigation::qrscanner::{ScanQrOptions, ScanQrResult};
 use slint_keyos_platform::navigation::open_qr_scanner;
 use slint_keyos_platform::qrcode;
 use slint_keyos_platform::slint::{Color, ComponentHandle, ModelRc, Timer, VecModel};
 
-app_ui!("prime-pgp-keychain");
+app_ui2!("PGP Keychain");
 security::use_api!();
 
 /// App-managed keychain directory on Internal (User) storage.
@@ -967,8 +967,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             // Blocks while the system scanner modal owns the screen — the
             // same synchronous pattern KeyOS's authenticator app uses.
             let scanned = match open_qr_scanner::<gui_permissions::GuiPermissions>(opts) {
-                Ok(Some(ScanQrResult::Qr(data))) => data,
-                Ok(Some(ScanQrResult::Ur2(ur_type, data))) => {
+                Ok(Some(ScanQrResult::Qr { data, .. })) => data,
+                Ok(Some(ScanQrResult::Ur2 { ur_type, data, .. })) => {
                     log::info!("cb: sign-qr scanned ur={ur_type}");
                     data
                 }

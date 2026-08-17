@@ -1,4 +1,4 @@
-import { Theme, UISize, ButtonVariant } from "@ui/theme.slint";
+import { Theme, UISize, ButtonVariant, Images, ControlSize } from "@ui/theme.slint";
 import { Callbacks, KeyList, Detail, Browser, Ui, KeyRow, DetailRow, FileRow } from "callbacks.slint";
 import { Button } from "@ui/button.slint";
 import { Icon } from "@ui/icon.slint";
@@ -7,7 +7,7 @@ import { SegmentedControl } from "@ui/segmented_control.slint";
 import { Dialog, DialogVariant } from "@ui/dialog.slint";
 import { Checkbox } from "@ui/checkbox.slint";
 
-export { Callbacks, KeyList, Detail, Browser, Ui, KeyRow, DetailRow, FileRow, Theme }
+export { Callbacks, KeyList, Detail, Browser, Ui, KeyRow, DetailRow, FileRow, Theme, Images, ControlSize }
 
 // A round icon button built from a raw TouchArea. The SDK IconButton sizes its
 // touch area to a fixed control-size rather than the laid-out size, so its
@@ -1207,45 +1207,129 @@ export component AppWindow inherits Window {
             }
         }
 
-        if Ui.show-export-secret-confirm: Dialog {
+        if Ui.show-export-secret-confirm: export-secret-dialog := Dialog {
             width: 100%;
             height: 100%;
             open: true;
-            title: "Export secret key?";
-            message: "The exported file contains your private key material. Anyone with the file (and passphrase) controls this identity.";
-            primary-action: "Export secret key";
-            secondary-action: "Cancel";
             variant: DialogVariant.danger;
-            primary-clicked => {
-                Ui.show-export-secret-confirm = false;
-                Callbacks.export-key(true, Ui.export-dest);
-            }
-            secondary-clicked => {
-                Ui.show-export-secret-confirm = false;
-            }
             dismissed => {
                 Ui.show-export-secret-confirm = false;
+            }
+
+            VerticalLayout {
+                spacing: Theme.spacing-xs;
+                padding-right: export-secret-dialog.close-button-size + Theme.spacing-sm;
+
+                Text {
+                    text: "Export secret key?";
+                    color: export-secret-dialog.title-color;
+                    font-family: export-secret-dialog.font-family;
+                    font-size: export-secret-dialog.title-font-size;
+                    font-weight: export-secret-dialog.title-font-weight;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: "The exported file contains your private key material. Anyone with the file (and passphrase) controls this identity.";
+                    color: export-secret-dialog.message-color;
+                    font-family: export-secret-dialog.font-family;
+                    font-size: export-secret-dialog.font-size;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle {
+                height: Theme.border-width-sm;
+                background: export-secret-dialog.separator-color;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                alignment: end;
+
+                Button {
+                    text: "Cancel";
+                    variant: ButtonVariant.secondary;
+                    size: export-secret-dialog.size;
+                    touch-expansion: 0px;
+                    clicked => {
+                        Ui.show-export-secret-confirm = false;
+                    }
+                }
+
+                Button {
+                    text: "Export secret key";
+                    variant: ButtonVariant.danger;
+                    size: export-secret-dialog.size;
+                    touch-expansion: 0px;
+                    clicked => {
+                        Ui.show-export-secret-confirm = false;
+                        Callbacks.export-key(true, Ui.export-dest);
+                    }
+                }
             }
         }
 
-        if Ui.show-delete: Dialog {
+        if Ui.show-delete: delete-dialog := Dialog {
             width: 100%;
             height: 100%;
             open: true;
-            title: "Delete key";
-            message: "Delete \"" + Detail.title + "\" from the keychain?" + (Detail.has-secret ? " The secret key will be gone unless you exported it." : "");
-            primary-action: "Delete";
-            secondary-action: "Cancel";
             variant: DialogVariant.danger;
-            primary-clicked => {
-                Ui.show-delete = false;
-                Callbacks.delete-key(Detail.filename);
-            }
-            secondary-clicked => {
-                Ui.show-delete = false;
-            }
             dismissed => {
                 Ui.show-delete = false;
+            }
+
+            VerticalLayout {
+                spacing: Theme.spacing-xs;
+                padding-right: delete-dialog.close-button-size + Theme.spacing-sm;
+
+                Text {
+                    text: "Delete key";
+                    color: delete-dialog.title-color;
+                    font-family: delete-dialog.font-family;
+                    font-size: delete-dialog.title-font-size;
+                    font-weight: delete-dialog.title-font-weight;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: "Delete \"" + Detail.title + "\" from the keychain?" + (Detail.has-secret ? " The secret key will be gone unless you exported it." : "");
+                    color: delete-dialog.message-color;
+                    font-family: delete-dialog.font-family;
+                    font-size: delete-dialog.font-size;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle {
+                height: Theme.border-width-sm;
+                background: delete-dialog.separator-color;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                alignment: end;
+
+                Button {
+                    text: "Cancel";
+                    variant: ButtonVariant.secondary;
+                    size: delete-dialog.size;
+                    touch-expansion: 0px;
+                    clicked => {
+                        Ui.show-delete = false;
+                    }
+                }
+
+                Button {
+                    text: "Delete";
+                    variant: ButtonVariant.danger;
+                    size: delete-dialog.size;
+                    touch-expansion: 0px;
+                    clicked => {
+                        Ui.show-delete = false;
+                        Callbacks.delete-key(Detail.filename);
+                    }
+                }
             }
         }
 
