@@ -632,9 +632,19 @@ fn graph_mutation_missing_resolve_root_is_a_clean_error_not_a_panic() {
 fn cargo_metadata_json(target_triple: &str) -> String {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    // `--filter-platform` makes cargo ask rustc about the target, and since
+    // SDK 1.0.0's toolchain that query rejects the KeyOS target spec without
+    // `-Zunstable-options` ("custom targets are unstable"). Scoped to this
+    // one metadata call on purpose: exporting it for real builds breaks the
+    // getrandom compile.
+    let rustflags = match std::env::var("RUSTFLAGS") {
+        Ok(existing) if !existing.is_empty() => format!("{existing} -Zunstable-options"),
+        _ => "-Zunstable-options".to_string(),
+    };
     let out = Command::new(&cargo)
         .args(["metadata", "--format-version", "1", "--filter-platform", target_triple, "--manifest-path"])
         .arg(&manifest)
+        .env("RUSTFLAGS", rustflags)
         .output()
         .unwrap_or_else(|e| panic!("failed to run `{cargo} metadata`: {e}"));
     assert!(

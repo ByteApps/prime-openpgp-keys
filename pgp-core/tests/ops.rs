@@ -475,3 +475,39 @@ fn sign_detached_armored_roundtrip() {
         .verify(&sk.primary_key.public_key(), b"tampered payload")
         .expect_err("tampered data verified");
 }
+
+/// Every key this crate creates must advertise its algorithm preferences.
+///
+/// A key that advertises none is not merely terse: RFC 4880 §13.2 tells a
+/// sender to fall back to TripleDES, so an unadorned key quietly invites a
+/// 64-bit block cipher instead of AES-256 — and key-quality checkers score
+/// it down accordingly. Both creation paths (seed-derived and random RSA)
+/// shipped empty lists until 2026-08-17.
+#[test]
+fn created_keys_advertise_algorithm_preferences() {
+    let key = pgp_core::derive_ed25519(&[0x11u8; 32], 0, "Prefs", "prefs@example.com", None)
+        .expect("derive_ed25519 failed");
+    let sig = key.details.users[0]
+        .signatures
+        .first()
+        .expect("user ID must carry a self-signature");
+
+    let sym = sig.preferred_symmetric_algs();
+    assert!(
+        !sym.is_empty(),
+        "no preferred symmetric algorithms — senders fall back to TripleDES"
+    );
+    assert_eq!(
+        sym.first().copied(),
+        Some(pgp::crypto::sym::SymmetricKeyAlgorithm::AES256),
+        "AES-256 must be the first choice"
+    );
+    assert!(
+        !sig.preferred_hash_algs().is_empty(),
+        "no preferred hash algorithms"
+    );
+    assert!(
+        !sig.preferred_compression_algs().is_empty(),
+        "no preferred compression algorithms"
+    );
+}

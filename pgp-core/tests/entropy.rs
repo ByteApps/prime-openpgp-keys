@@ -272,3 +272,23 @@ fn derive_ed25519_is_the_only_deterministic_path() {
          deliberately) or it regressed:\n{body}"
     );
 }
+
+/// The recovery contract, pinned to a literal. `derive_ed25519`'s output
+/// commits to the HKDF salt/info strings and to `DERIVED_KEY_CREATED_AT`
+/// (a fingerprint covers the key's creation time), so any drift in those
+/// silently strands every key a user derived before the change — their
+/// seed would no longer reproduce the identity they published.
+///
+/// The sibling determinism tests above compare two runs of the SAME
+/// build and cannot see that; only a literal captured from a known-good
+/// build can. Preferences, user IDs and passphrases live in signature
+/// packets rather than the public key packet, so changing them must NOT
+/// move this value.
+#[test]
+fn derive_ed25519_fingerprint_is_pinned() {
+    assert_eq!(
+        fingerprint_of(&[0x11u8; 32], 0),
+        "9D53AA0177D528C7B52545083FE08F54CA0D6AF1",
+        "seed-derived identity changed — see the comment above before touching the expected value"
+    );
+}

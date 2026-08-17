@@ -16,6 +16,7 @@ use pgp::composed::{
     PublicOrSecret, SecretKeyParamsBuilder, SubkeyParamsBuilder,
 };
 use pgp::crypto::ecc_curve::ECCCurve;
+use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use pgp::packet::{
     PacketTrait, Signature, SignatureConfig, SignatureType, Subpacket, SubpacketData, UserId,
@@ -380,6 +381,7 @@ pub fn generate_rsa(
         .can_sign(true)
         .primary_user_id(format!("{name} <{email}>"))
         .subkeys(vec![subkey]);
+    advertise_algorithm_preferences(&mut params);
     if let Some(pw) = passphrase {
         params.passphrase(Some(pw.to_string()));
     }
@@ -390,6 +392,47 @@ pub fn generate_rsa(
     let key = params.generate(thread_rng())?;
     key.verify_bindings()?;
     Ok(key)
+}
+
+/// Advertise the symmetric, hash and compression algorithms a sender should
+/// use when working with keys this crate creates.
+///
+/// Not cosmetic: RFC 4880 §13.2 makes TripleDES the fallback a sender must
+/// assume when a recipient advertises no symmetric preference, so a key
+/// without these invites a 64-bit block cipher instead of AES-256. The lists
+/// are ordered strongest-first and mirror what GnuPG advertises, so the
+/// negotiated algorithm is the same one either side would have picked.
+///
+/// These land in the user ID's self-signature, not the public key packet —
+/// they do not affect fingerprints (pinned by
+/// `derive_ed25519_fingerprint_is_pinned`).
+fn advertise_algorithm_preferences(params: &mut SecretKeyParamsBuilder) {
+    params
+        .preferred_symmetric_algorithms(
+            vec![
+                SymmetricKeyAlgorithm::AES256,
+                SymmetricKeyAlgorithm::AES192,
+                SymmetricKeyAlgorithm::AES128,
+            ]
+            .into(),
+        )
+        .preferred_hash_algorithms(
+            vec![
+                HashAlgorithm::Sha512,
+                HashAlgorithm::Sha384,
+                HashAlgorithm::Sha256,
+                HashAlgorithm::Sha224,
+            ]
+            .into(),
+        )
+        .preferred_compression_algorithms(
+            vec![
+                CompressionAlgorithm::ZLIB,
+                CompressionAlgorithm::ZIP,
+                CompressionAlgorithm::Uncompressed,
+            ]
+            .into(),
+        );
 }
 
 // ---------------------------------------------------------------------------
@@ -441,13 +484,16 @@ pub fn derive_ed25519(
         .build()
         .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
 
-    let params = SecretKeyParamsBuilder::default()
+    let mut params = SecretKeyParamsBuilder::default();
+    params
         .key_type(KeyType::Ed25519Legacy)
         .can_certify(true)
         .can_sign(true)
         .created_at(created)
         .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey])
+        .subkeys(vec![subkey]);
+    advertise_algorithm_preferences(&mut params);
+    let params = params
         .build()
         .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
 
