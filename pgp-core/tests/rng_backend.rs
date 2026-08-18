@@ -629,22 +629,88 @@ fn graph_mutation_missing_resolve_root_is_a_clean_error_not_a_panic() {
 
 // --- the real graph, both real targets ---
 
+/// Locate a `nix` executable without assuming the ambient shell has already
+/// sourced the multi-user daemon's profile script (see the workspace
+/// CLAUDE.md "Environment / toolchain" section: a non-login shell needs
+/// `. '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'` first).
+/// Tries PATH, then the standard multi-user install location.
+fn nix_binary() -> String {
+    if Command::new("nix").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        return "nix".to_string();
+    }
+    const FALLBACK: &str = "/nix/var/nix/profiles/default/bin/nix";
+    if Path::new(FALLBACK).exists() {
+        return FALLBACK.to_string();
+    }
+    panic!(
+        "no `nix` executable found on PATH or at {FALLBACK} — the device-target dependency \
+         graph check needs the Foundation SDK's Nix shell (see below), which needs Nix itself"
+    );
+}
+
+/// `cargo metadata --filter-platform` makes cargo ask rustc about the
+/// target. For the KeyOS device target that query only succeeds through the
+/// Foundation SDK's Nix-provided nightly rustc: `armv7a-unknown-xous-elf` is
+/// a patched-in target that toolchain treats as "custom" (gated behind
+/// `-Zunstable-options`, which nightly accepts natively) — verified against
+/// `foundation`'s own embedded RUSTFLAGS for real hardware builds, which
+/// carries the same flag. The standalone rustup toolchain that plain `cargo
+/// test -p pgp-core` runs under doesn't know this target exists at all
+/// (`rustc --print target-list` has no `armv7a-unknown-xous-elf` entry
+/// there), so passing `-Zunstable-options` to IT just trades "unknown
+/// target" for "the option `Z` is only accepted on the nightly compiler" —
+/// confirmed empirically, both ways, while fixing this test after the SDK
+/// 1.0.0 toolchain bump. So the device-target call is routed through
+/// `nix develop <sdk root> --command cargo metadata ...` instead of the
+/// ambient `cargo`; the host-target twin below is unaffected and keeps
+/// using the ambient toolchain (its target is a rustc builtin everywhere).
 fn cargo_metadata_json(target_triple: &str) -> String {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    // `--filter-platform` makes cargo ask rustc about the target, and since
-    // SDK 1.0.0's toolchain that query rejects the KeyOS target spec without
-    // `-Zunstable-options` ("custom targets are unstable"). Scoped to this
-    // one metadata call on purpose: exporting it for real builds breaks the
-    // getrandom compile.
-    let rustflags = match std::env::var("RUSTFLAGS") {
-        Ok(existing) if !existing.is_empty() => format!("{existing} -Zunstable-options"),
-        _ => "-Zunstable-options".to_string(),
-    };
+
+    if target_triple == DEVICE_TARGET {
+        let sdk_root = std::env::var("FOUNDATION_SDK_ROOT").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{home}/.foundation/sdk/current")
+        });
+        let nix = nix_binary();
+        let out = Command::new(&nix)
+            .args(["develop", &sdk_root, "--command", "cargo", "metadata", "--format-version", "1", "--filter-platform", target_triple, "--manifest-path"])
+            .arg(&manifest)
+            // Scoped to this one metadata call on purpose: exporting
+            // -Zunstable-options for real builds' RUSTFLAGS is `foundation`'s
+            // job (it already does this), not this test's.
+            .env("RUSTFLAGS", "-Zunstable-options")
+            .output()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to run `{nix} develop {sdk_root} --command cargo metadata` for the \
+                     device target: {e}\n\nThis check needs the Foundation SDK's Nix shell — run \
+                     `foundation doctor` and make sure `nix develop {sdk_root}` works on its own \
+                     first."
+                )
+            });
+        assert!(
+            out.status.success(),
+            "`nix develop {sdk_root} --command cargo metadata --filter-platform {target_triple}` \
+             failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).expect("cargo metadata output was not UTF-8");
+        // The SDK's Nix flake prints a "Foundation SDK user shell ready."
+        // banner via its shellHook, onto stdout, ahead of the real command's
+        // own output — `nix develop --command` doesn't suppress it. The
+        // metadata document itself always starts with `{`, so trim anything
+        // the shell hook printed before it rather than fighting the hook.
+        return match stdout.find('{') {
+            Some(idx) => stdout[idx..].to_string(),
+            None => panic!("no JSON object found in `nix develop` output:\n{stdout}"),
+        };
+    }
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let out = Command::new(&cargo)
         .args(["metadata", "--format-version", "1", "--filter-platform", target_triple, "--manifest-path"])
         .arg(&manifest)
-        .env("RUSTFLAGS", rustflags)
         .output()
         .unwrap_or_else(|e| panic!("failed to run `{cargo} metadata`: {e}"));
     assert!(
