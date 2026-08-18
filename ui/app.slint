@@ -669,6 +669,15 @@ component CreateView inherits VerticalLayout {
             create-account-input.clear-focus();
         }
     }
+    // The date has to be a fixed constant: the OpenPGP fingerprint commits to
+    // the creation timestamp, so a "real" date would break re-derivation.
+    if Ui.create-mode == 1: Text {
+        text: "Derived keys are always dated 2009-01-03. The date is part of the key's fingerprint, so it must be fixed for the same account to re-create the same key. It is public metadata and does not weaken the key.";
+        color: Theme.palette-muted;
+        font-family: "Montserrat";
+        font-size: 13px;
+        wrap: word-wrap;
+    }
 
     Button {
         full-width: true;
