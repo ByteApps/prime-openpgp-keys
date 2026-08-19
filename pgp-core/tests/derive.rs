@@ -123,3 +123,21 @@ fn derive_p521_roundtrips_and_passphrase_works() {
     assert_eq!(info.size_or_curve, "P521");
     assert_eq!(info.created_at, 1_231_006_505);
 }
+
+#[test]
+fn derived_keys_encrypt_and_decrypt() {
+    // The derived subkeys are built from the deterministic stream, not the
+    // system RNG — prove the ECDH half actually works for both schemes.
+    for (name, key) in [
+        ("ed25519", derive_ed25519(&[3u8; 32], 0, "D", "d@example.com", Some("pw")).unwrap()),
+        ("p521", derive_p521(&[3u8; 32], 0, "D", "d@example.com", Some("pw")).unwrap()),
+    ] {
+        let plain = format!("derived {name} roundtrip").into_bytes();
+        let k = PgpKey::Secret(key.clone());
+        let cipher = encrypt_bytes(&k, "t.txt", plain.clone(), None)
+            .unwrap_or_else(|e| panic!("{name}: encrypt failed: {e}"));
+        let got = decrypt_bytes(&key, "pw", cipher)
+            .unwrap_or_else(|e| panic!("{name}: decrypt failed: {e}"));
+        assert_eq!(got, plain, "{name}");
+    }
+}

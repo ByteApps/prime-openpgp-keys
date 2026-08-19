@@ -585,3 +585,42 @@ fn gpg_accepts_our_p384_key() {
     );
     assert!(ok, "gpg --sign with our P-384 key failed: {err}");
 }
+
+#[test]
+fn gpg_encrypts_all_nist_curves_we_decrypt_and_back() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    for curve in [NistCurve::P256, NistCurve::P384, NistCurve::P521] {
+        let name = format!("{curve:?}");
+        let key = generate_nistp(curve, &name, &format!("{name}@example.com"), Some("s3cret")).unwrap();
+        let info = key_info(&PgpKey::Secret(key.clone()));
+        gpg.import(&export_armored(&PgpKey::Secret(key.clone())).unwrap());
+
+        // gpg encrypts -> we decrypt
+        let plain = format!("gpg sealed this to {name}\n").into_bytes();
+        let src = gpg.home.join(format!("{name}.txt"));
+        std::fs::write(&src, &plain).unwrap();
+        let out = gpg.home.join(format!("{name}.gpg"));
+        let (ok, _, err) = gpg.run(
+            &["--yes", "--trust-model", "always", "-r", info.key_id.as_str(), "-e",
+              "--output", out.to_str().unwrap(), src.to_str().unwrap()],
+            b"",
+        );
+        assert!(ok, "{name}: gpg encrypt failed: {err}");
+        let got = decrypt_bytes(&key, "s3cret", std::fs::read(&out).unwrap())
+            .unwrap_or_else(|e| panic!("{name}: our decrypt failed: {e}"));
+        assert_eq!(got, plain, "{name}");
+
+        // we encrypt -> gpg decrypts
+        let cipher =
+            encrypt_bytes(&PgpKey::Secret(key.clone()), "t.txt", plain.clone(), None).unwrap();
+        let enc = gpg.home.join(format!("{name}-ours.gpg"));
+        std::fs::write(&enc, &cipher).unwrap();
+        let (ok, out_txt, err) = gpg.run(
+            &["--passphrase", "s3cret", "--decrypt", enc.to_str().unwrap()],
+            b"",
+        );
+        assert!(ok, "{name}: gpg -d of our message failed: {err}");
+        assert_eq!(out_txt.as_bytes(), &plain[..], "{name}: gpg plaintext mismatch");
+    }
+}
