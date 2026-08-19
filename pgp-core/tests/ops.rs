@@ -122,6 +122,14 @@ fn parse_nistp256() {
 }
 
 #[test]
+fn parse_nistp521() {
+    check_fixture_pair(
+        "nistp521",
+        Expected { algo: "ECDSA", size_or_curve: "P521", sub_algo: "ECDH" },
+    );
+}
+
+#[test]
 fn parse_multiple_keys_in_one_file() {
     // Both real-world shapes: two concatenated armor blocks (cat a.asc
     // b.asc) and one armor block holding two keys (gpg --export k1 k2).
@@ -201,12 +209,56 @@ fn generate_rsa4096_roundtrip() {
     generate_roundtrip(4096);
 }
 
+#[test]
+fn generate_p521_roundtrip() {
+    let key = generate_p521("Gen P521", "p521@example.com", Some("gen-pass")).unwrap();
+    let armored = export_armored(&PgpKey::Secret(key.clone())).unwrap();
+    assert!(armored.starts_with("-----BEGIN PGP PRIVATE KEY BLOCK-----"));
+
+    let reparsed = parse_one_bytes(armored.as_bytes());
+    let info = key_info(&reparsed);
+    assert!(info.has_secret);
+    assert_eq!(info.algorithm, "ECDSA");
+    assert_eq!(info.size_or_curve, "P521");
+    assert_eq!(info.user_ids, vec!["Gen P521 <p521@example.com>".to_string()]);
+    assert_eq!(info.expires_at, None);
+    assert_eq!(info.subkeys.len(), 1);
+    assert_eq!(info.subkeys[0].algorithm, "ECDH");
+    assert_eq!(info.subkeys[0].size_or_curve, "P521");
+    assert!(info.subkeys[0].usage.contains("encrypt"));
+
+    // public export drops secret material but keeps identity
+    let pub_armored = export_public_armored(&reparsed).unwrap();
+    let pub_key = parse_one_bytes(pub_armored.as_bytes());
+    assert!(!pub_key.has_secret());
+    assert_eq!(key_info(&pub_key).fingerprint, info.fingerprint);
+
+    if let PgpKey::Secret(sk) = &reparsed {
+        assert!(check_passphrase(sk, "gen-pass").is_ok());
+        assert!(check_passphrase(sk, "not-it").is_err());
+
+        // No gpg fixture exists for P-521, so the *_all_algorithms suites
+        // never touch it — cover sign and encrypt on the fresh key here.
+        use pgp::composed::{Deserializable, DetachedSignature};
+        let data = b"p521 payload";
+        let sig_bytes = sign_detached(sk, "gen-pass", data).unwrap();
+        let parsed = DetachedSignature::from_bytes(&sig_bytes[..]).unwrap();
+        parsed.verify(&sk.primary_key.public_key(), data).unwrap();
+        parsed
+            .verify(&sk.primary_key.public_key(), b"tampered")
+            .expect_err("tampered data verified");
+
+        let cipher = encrypt_bytes(&reparsed, "t.txt", data.to_vec(), None).unwrap();
+        assert_eq!(decrypt_bytes(sk, "gen-pass", cipher).unwrap(), data);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Edit operations (parameterized across algorithms)
 // ---------------------------------------------------------------------------
 
 /// Secret fixtures whose primary key rpgp can sign with.
-const EDITABLE: &[&str] = &["rsa2048", "ed25519-cv25519", "nistp256", "dsa-elgamal"];
+const EDITABLE: &[&str] = &["rsa2048", "ed25519-cv25519", "nistp256", "nistp521", "dsa-elgamal"];
 
 #[test]
 fn set_expiration_roundtrip_all_algorithms() {
@@ -334,7 +386,7 @@ fn edits_refused_without_secret_material() {
 fn sign_detached_roundtrip_all_algorithms() {
     use pgp::composed::{Deserializable, DetachedSignature};
 
-    for name in ["rsa2048", "rsa4096", "ed25519-cv25519", "nistp256"] {
+    for name in ["rsa2048", "rsa4096", "ed25519-cv25519", "nistp256", "nistp521"] {
         let sk = secret(&format!("{name}-secret.asc"));
         let data = b"detached signing payload";
         let sig_bytes = sign_detached(&sk, PASS, data).unwrap();
@@ -368,7 +420,7 @@ fn sign_detached_wrong_passphrase() {
 fn encrypt_decrypt_roundtrip_all_algorithms() {
     // dsa-elgamal is excluded: rpgp does not implement ElGamal encryption
     // (legacy algorithm, dropped from RFC 9580) — see the test below.
-    for name in ["rsa2048", "rsa4096", "ed25519-cv25519", "nistp256"] {
+    for name in ["rsa2048", "rsa4096", "ed25519-cv25519", "nistp256", "nistp521"] {
         let sk = secret(&format!("{name}-secret.asc"));
         let plain = format!("roundtrip payload for {name}").into_bytes();
 

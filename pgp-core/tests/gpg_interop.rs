@@ -413,10 +413,117 @@ fn we_import_every_gpg_generated_algorithm() {
     // The reverse direction of the interop story: keys born in gpg parse
     // through pgp-core. (No gpg needed at runtime — fixtures are committed —
     // but kept here since it is the counterpart of the export tests.)
-    for name in ["rsa2048", "rsa4096", "dsa-elgamal", "ed25519-cv25519", "nistp256"] {
+    for name in ["rsa2048", "rsa4096", "dsa-elgamal", "ed25519-cv25519", "nistp256", "nistp521"] {
         for variant in ["public", "secret"] {
             let keys = parse_keys(&fixture(&format!("{name}-{variant}.asc"))).unwrap();
             assert_eq!(keys.len(), 1, "{name}-{variant}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// NIST P-521 ("strongest classical" tier) — generated keys, both directions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gpg_imports_our_p521_key() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = generate_p521("P521 Interop", "p521@example.com", Some("s3cret")).unwrap();
+    let info = key_info(&PgpKey::Secret(key.clone()));
+
+    gpg.import(&export_public_armored(&PgpKey::Secret(key.clone())).unwrap());
+    gpg.import(&export_armored(&PgpKey::Secret(key)).unwrap());
+
+    let sec_recs = gpg.colons(&["--list-secret-keys", "--with-colons"]);
+    assert!(
+        sec_recs.iter().any(|r| r[0] == "fpr" && r[9] == info.fingerprint),
+        "secret key not in gpg keyring"
+    );
+
+    let (ok, out, err) = gpg.run(&["--check-sigs", "--with-colons", &info.fingerprint], b"");
+    assert!(ok, "--check-sigs failed: {err}");
+    assert!(out.lines().any(|l| l.starts_with("sig:!")), "no valid self-sig: {out}");
+
+    let (ok, _, err) = gpg.run(
+        &["--passphrase", "s3cret", "--local-user", &info.fingerprint, "--sign", "--output", "/dev/null"],
+        b"payload",
+    );
+    assert!(ok, "gpg --sign with our P-521 key failed: {err}");
+}
+
+#[test]
+fn gpg_verifies_our_p521_detached_signature() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = generate_p521("P521 Sig", "p521-sig@example.com", Some("s3cret")).unwrap();
+    gpg.import(&export_public_armored(&PgpKey::Secret(key.clone())).unwrap());
+
+    let data = b"p521 interop payload\n";
+    let sig = sign_detached(&key, "s3cret", data).unwrap();
+
+    let data_path = gpg.home.join("p521.payload");
+    let sig_path = gpg.home.join("p521.payload.sig");
+    std::fs::write(&data_path, data).unwrap();
+    std::fs::write(&sig_path, &sig).unwrap();
+
+    let (ok, out, err) = gpg.run(
+        &["--status-fd", "1", "--verify", sig_path.to_str().unwrap(), data_path.to_str().unwrap()],
+        b"",
+    );
+    assert!(ok && out.contains("GOODSIG"), "gpg --verify failed: {out}{err}");
+
+    std::fs::write(&data_path, b"tampered\n").unwrap();
+    let (ok, _, _) = gpg.run(
+        &["--verify", sig_path.to_str().unwrap(), data_path.to_str().unwrap()],
+        b"",
+    );
+    assert!(!ok, "gpg accepted a tampered payload");
+}
+
+#[test]
+fn gpg_encrypts_p521_we_decrypt() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = generate_p521("P521 Dec", "p521-dec@example.com", Some("s3cret")).unwrap();
+    let info = key_info(&PgpKey::Secret(key.clone()));
+    gpg.import(&export_public_armored(&PgpKey::Secret(key.clone())).unwrap());
+
+    let plain = b"gpg encrypted this to p521\n";
+    let src = gpg.home.join("plain.txt");
+    std::fs::write(&src, plain).unwrap();
+
+    for (flags, out_name) in [(vec!["-e"], "c.gpg"), (vec!["-e", "-a"], "c.asc")] {
+        let out = gpg.home.join(out_name);
+        let mut args = vec!["--yes", "--trust-model", "always", "-r", info.key_id.as_str()];
+        args.extend(flags.iter().copied());
+        args.extend(["--output", out.to_str().unwrap(), src.to_str().unwrap()]);
+        let (ok, _, err) = gpg.run(&args, b"");
+        assert!(ok, "gpg encrypt ({out_name}) failed: {err}");
+
+        let cipher = std::fs::read(&out).unwrap();
+        let got = decrypt_bytes(&key, "s3cret", cipher)
+            .unwrap_or_else(|e| panic!("decrypt of gpg {out_name} failed: {e}"));
+        assert_eq!(got, plain, "{out_name}: plaintext mismatch");
+    }
+}
+
+#[test]
+fn we_encrypt_p521_gpg_decrypts() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = generate_p521("P521 Enc", "p521-enc@example.com", Some("s3cret")).unwrap();
+    gpg.import(&export_armored(&PgpKey::Secret(key.clone())).unwrap());
+
+    let plain = b"we encrypted this to p521 for gpg\n".to_vec();
+    let cipher = encrypt_bytes(&PgpKey::Secret(key.clone()), "t.txt", plain.clone(), None).unwrap();
+    let enc_path = gpg.home.join("ours-p521.gpg");
+    std::fs::write(&enc_path, &cipher).unwrap();
+
+    let (ok, out, err) = gpg.run(
+        &["--passphrase", "s3cret", "--decrypt", enc_path.to_str().unwrap()],
+        b"",
+    );
+    assert!(ok, "gpg -d of our P-521 message failed: {err}");
+    assert_eq!(out.as_bytes(), &plain[..], "gpg-decrypted plaintext mismatch");
 }

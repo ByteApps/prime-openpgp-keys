@@ -479,10 +479,17 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let name = name.to_string();
             let email = email.to_string();
             let pass = pass.to_string();
-            let bits: u32 = match bits_index {
-                1 => 3072,
-                2 => 4096,
-                _ => 2048,
+            // Algorithm row: indexes 0-2 are RSA sizes, 3 is the NIST
+            // P-521 tier (ECDSA primary + ECDH subkey).
+            let bits: Option<u32> = match bits_index {
+                1 => Some(3072),
+                2 => Some(4096),
+                3 => None,
+                _ => Some(2048),
+            };
+            let (algo_label, algo_log) = match bits {
+                Some(b) => (format!("RSA-{b}"), format!("rsa{b}")),
+                None => ("P-521".to_string(), "p521".to_string()),
             };
             if name.trim().is_empty() || email.trim().is_empty() {
                 show_error(&ui, "Name and email are required".to_string());
@@ -490,7 +497,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             }
 
             let u = ui.global::<Ui>();
-            u.set_busy_text(format!("Generating RSA-{bits} key…").into());
+            u.set_busy_text(format!("Generating {algo_label} key…").into());
             u.set_busy(true);
 
             // Give the busy overlay a frame to paint before the (blocking,
@@ -502,8 +509,11 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             Timer::single_shot(Duration::from_millis(150), move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let passphrase = if pass.is_empty() { None } else { Some(pass.as_str()) };
-                let result = pgp_core::generate_rsa(bits, name.trim(), email.trim(), passphrase)
-                    .map_err(|e| e.0)
+                let result = match bits {
+                    Some(b) => pgp_core::generate_rsa(b, name.trim(), email.trim(), passphrase),
+                    None => pgp_core::generate_p521(name.trim(), email.trim(), passphrase),
+                }
+                .map_err(|e| e.0)
                     .and_then(|key| {
                         let key = PgpKey::Secret(key);
                         save_key(&fs, &key).map(|f| (f, key))
@@ -512,13 +522,13 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 match result {
                     Ok((filename, key)) => {
                         let info = pgp_core::key_info(&key);
-                        log::info!("cb: create-key rsa{bits} ok fpr={}", info.fingerprint);
+                        log::info!("cb: create-key {algo_log} ok fpr={}", info.fingerprint);
                         refresh_keys();
                         open_key(filename);
                         show_info(&ui, "Key generated");
                     }
                     Err(e) => {
-                        log::info!("cb: create-key rsa{bits} err={e}");
+                        log::info!("cb: create-key {algo_log} err={e}");
                         show_error(&ui, e);
                     }
                 }

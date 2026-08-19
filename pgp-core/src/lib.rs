@@ -394,6 +394,49 @@ pub fn generate_rsa(
     Ok(key)
 }
 
+/// Generate a NIST P-521 sign+certify primary key (ECDSA) with a P-521
+/// ECDH encryption subkey.
+///
+/// The strongest classical pair this crate offers (~256-bit security vs
+/// ~128 for Curve25519 and ~140 for RSA-4096). Interops as ordinary v4
+/// RFC 6637 keys with GnuPG >= 2.1; signatures hash with SHA-512 via the
+/// advertised preferences.
+pub fn generate_p521(
+    name: &str,
+    email: &str,
+    passphrase: Option<&str>,
+) -> Result<SignedSecretKey, PgpError> {
+    let mut subkey = SubkeyParamsBuilder::default();
+    subkey
+        .key_type(KeyType::ECDH(ECCCurve::P521))
+        .can_encrypt(EncryptionCaps::All);
+    if let Some(pw) = passphrase {
+        subkey.passphrase(Some(pw.to_string()));
+    }
+    let subkey = subkey
+        .build()
+        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+
+    let mut params = SecretKeyParamsBuilder::default();
+    params
+        .key_type(KeyType::ECDSA(ECCCurve::P521))
+        .can_certify(true)
+        .can_sign(true)
+        .primary_user_id(format!("{name} <{email}>"))
+        .subkeys(vec![subkey]);
+    advertise_algorithm_preferences(&mut params);
+    if let Some(pw) = passphrase {
+        params.passphrase(Some(pw.to_string()));
+    }
+    let params = params
+        .build()
+        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+
+    let key = params.generate(thread_rng())?;
+    key.verify_bindings()?;
+    Ok(key)
+}
+
 /// Advertise the symmetric, hash and compression algorithms a sender should
 /// use when working with keys this crate creates.
 ///

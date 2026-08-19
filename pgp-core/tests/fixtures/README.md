@@ -11,6 +11,7 @@ secret key is protected with the passphrase `fixture-pass`. `Expire-Date: 0`
 | `dsa-elgamal-*` | `Key-Type: DSA`, `Key-Length: 2048`, `Subkey-Type: ELG-E`, `Subkey-Length: 2048` |
 | `ed25519-cv25519-*` | `Key-Type: EDDSA`, `Key-Curve: ed25519`, `Subkey-Type: ECDH`, `Subkey-Curve: cv25519` |
 | `nistp256-*` | `Key-Type: ECDSA`, `Key-Curve: nistp256`, `Subkey-Type: ECDH`, `Subkey-Curve: nistp256` |
+| `nistp521-*` | `Key-Type: ECDSA`, `Key-Curve: nistp521`, `Subkey-Type: ECDH`, `Subkey-Curve: nistp521` (added 2026-08-19, same GnuPG 2.2.41, for the P-521 generation tier) |
 
 Each key was generated via `gpg --batch --pinentry-mode loopback --gen-key`
 with `Name-Real: Fixture <name>`, `Name-Email: <name>@example.com`, then

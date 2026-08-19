@@ -676,13 +676,13 @@ component CreateView inherits VerticalLayout {
         height: 64px;
         SegmentedControl {
             horizontal-stretch: 1;
-            options: ["RSA (random)", "From seed"];
+            options: ["Random", "From seed"];
             selected-index <=> Ui.create-mode;
         }
     }
 
     if Ui.create-mode == 0: Text {
-        text: "Key size";
+        text: "Algorithm";
         color: Theme.palette-muted;
         font-family: "Montserrat";
         font-size: 13px;
@@ -692,7 +692,7 @@ component CreateView inherits VerticalLayout {
         height: 64px;
         SegmentedControl {
             horizontal-stretch: 1;
-            options: ["2048", "3072", "4096"];
+            options: ["2048", "3072", "4096", "P-521"];
             selected-index <=> Ui.create-bits-index;
         }
     }
