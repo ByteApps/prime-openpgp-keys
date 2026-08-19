@@ -5,7 +5,7 @@
 OpenPGP Keys turns your Passport Prime into a personal certificate authority. Create keys, import the ones you already have, sign and encrypt files, and answer signing requests over nothing but QR codes — all on a device with no network stack and storage encrypted by your PIN. Best of all: keys can be **derived from your device's master seed**, so restoring your seed phrase restores your OpenPGP identity too.
 
 <p align="center">
-  <img src="screenshots/keychain.png" alt="Keychain list" width="280">
+  <img src="screenshots/keys.png" alt="Key list" width="280">
   &nbsp;
   <img src="screenshots/key-detail.png" alt="Key detail" width="280">
   &nbsp;
