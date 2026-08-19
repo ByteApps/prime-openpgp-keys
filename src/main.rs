@@ -448,7 +448,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 u.set_create_name("".into());
                 u.set_create_email("".into());
                 u.set_create_pass("".into());
-                u.set_create_bits_index(0);
+                u.set_create_bits_index(3); // default to the strongest algorithm (P-521)
                 u.set_create_mode(0);
                 u.set_create_account("0".into());
                 show_info(&ui, "");

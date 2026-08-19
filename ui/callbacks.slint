@@ -89,8 +89,10 @@ export global Ui {
     in-out property <string> create-name: "";
     in-out property <string> create-email: "";
     in-out property <string> create-pass: "";
-    in-out property <int> create-bits-index: 0;   // 0=2048 1=3072 2=4096
-    in-out property <int> create-mode: 0;         // 0 = RSA (random), 1 = from seed (Ed25519)
+    // 0=RSA-2048 1=RSA-3072 2=RSA-4096 3=P-521. Defaults to the strongest
+    // (P-521); show-create and the Key type toggle both reset it to 3.
+    in-out property <int> create-bits-index: 3;
+    in-out property <int> create-mode: 0;         // 0 = random, 1 = from seed (Ed25519)
     in-out property <string> create-account: "0"; // derivation index for from-seed mode
 
     // Busy overlay (key generation).

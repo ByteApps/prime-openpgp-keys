@@ -641,95 +641,125 @@ component CreateView inherits VerticalLayout {
         wrap: word-wrap;
     }
 
-    // Keyboard "Done" blurs each field so the on-screen keyboard drops away
-    // and the controls below stay tappable.
-    create-name-input := Input {
-        label: "Name";
-        placeholder: "Alice Example";
-        value <=> Ui.create-name;
-        submitted => {
-            create-name-input.clear-focus();
-        }
-    }
-    create-email-input := Input {
-        label: "Email";
-        placeholder: "alice@example.com";
-        value <=> Ui.create-email;
-        submitted => {
-            create-email-input.clear-focus();
-        }
-    }
-    create-pass-input := PassInput {
-        label: "Passphrase (optional)";
-        placeholder: "Passphrase";
-        value <=> Ui.create-pass;
-    }
+    // The form outgrows the 800px screen (the Algorithm hint pushed the
+    // Generate button past the bottom in Random mode), so it scrolls.
+    Flickable {
+        vertical-stretch: 1;
+        viewport-height: create-form.preferred-height;
 
-    Text {
-        text: "Key type";
-        color: Theme.palette-muted;
-        font-family: "Montserrat";
-        font-size: 13px;
-        font-weight: 700;
-    }
-    HorizontalLayout {
-        height: 64px;
-        SegmentedControl {
-            horizontal-stretch: 1;
-            options: ["Random", "From seed"];
-            selected-index <=> Ui.create-mode;
-        }
-    }
+        create-form := VerticalLayout {
+            alignment: start;
+            spacing: 14px;
 
-    if Ui.create-mode == 0: Text {
-        text: "Algorithm";
-        color: Theme.palette-muted;
-        font-family: "Montserrat";
-        font-size: 13px;
-        font-weight: 700;
-    }
-    if Ui.create-mode == 0: HorizontalLayout {
-        height: 64px;
-        SegmentedControl {
-            horizontal-stretch: 1;
-            options: ["2048", "3072", "4096", "P-521"];
-            selected-index <=> Ui.create-bits-index;
-        }
-    }
-    // From-seed keys are Ed25519, deterministically derived from the device
-    // master seed: the same account number always recreates the same key,
-    // so a seed-phrase restore recovers the identity.
-    if Ui.create-mode == 1: create-account-input := Input {
-        label: "Account number (same number = same key)";
-        placeholder: "0";
-        value <=> Ui.create-account;
-        submitted => {
-            create-account-input.clear-focus();
-        }
-    }
-    // The date has to be a fixed constant: the OpenPGP fingerprint commits to
-    // the creation timestamp, so a "real" date would break re-derivation.
-    if Ui.create-mode == 1: Text {
-        text: "Derived keys are always dated 2009-01-03. The date is part of the key's fingerprint, so it must be fixed for the same account to re-create the same key. It is public metadata and does not weaken the key.";
-        color: Theme.palette-muted;
-        font-family: "Montserrat";
-        font-size: 13px;
-        wrap: word-wrap;
-    }
+                // Keyboard "Done" blurs each field so the on-screen keyboard drops away
+                // and the controls below stay tappable.
+                create-name-input := Input {
+                    label: "Name";
+                    placeholder: "Alice Example";
+                    value <=> Ui.create-name;
+                    submitted => {
+                        create-name-input.clear-focus();
+                    }
+                }
+                create-email-input := Input {
+                    label: "Email";
+                    placeholder: "alice@example.com";
+                    value <=> Ui.create-email;
+                    submitted => {
+                        create-email-input.clear-focus();
+                    }
+                }
+                create-pass-input := PassInput {
+                    label: "Passphrase (optional)";
+                    placeholder: "Passphrase";
+                    value <=> Ui.create-pass;
+                }
 
-    Button {
-        full-width: true;
-        text: Ui.create-mode == 1 ? "Derive" : "Generate";
-        clicked => {
-            if (Ui.create-mode == 1) {
-                Callbacks.create-derived-key(Ui.create-name, Ui.create-email, Ui.create-account, Ui.create-pass);
-            } else {
-                Callbacks.create-key(Ui.create-name, Ui.create-email, Ui.create-bits-index, Ui.create-pass);
-            }
+                Text {
+                    text: "Key type";
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+                HorizontalLayout {
+                    height: 64px;
+                    SegmentedControl {
+                        horizontal-stretch: 1;
+                        options: ["Random", "From seed"];
+                        selected-index <=> Ui.create-mode;
+                        // Switching key types re-defaults the algorithm to
+                        // the strongest option rather than whatever was left
+                        // selected.
+                        changed selected-index => {
+                            Ui.create-bits-index = 3;
+                        }
+                    }
+                }
+
+                if Ui.create-mode == 0: Text {
+                    text: "Algorithm";
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+                if Ui.create-mode == 0: HorizontalLayout {
+                    height: 64px;
+                    SegmentedControl {
+                        horizontal-stretch: 1;
+                        options: ["2048", "3072", "4096", "P-521"];
+                        selected-index <=> Ui.create-bits-index;
+                    }
+                }
+                // One-glance strength/compatibility note for the selected algorithm.
+                if Ui.create-mode == 0: Text {
+                    text: Ui.create-bits-index == 0
+                        ? "RSA-2048 — about 112-bit strength. Universally supported; the smallest and quickest RSA."
+                        : Ui.create-bits-index == 1
+                        ? "RSA-3072 — about 128-bit strength. Universally supported."
+                        : Ui.create-bits-index == 2
+                        ? "RSA-4096 — about 140-bit strength. Universally supported; slowest to generate."
+                        : "NIST P-521 (secp521r1; ECDSA + ECDH) — about 256-bit strength, the strongest option. Fast; needs ECC-aware PGP software (GnuPG 2.1+).";
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                // From-seed keys are Ed25519, deterministically derived from the device
+                // master seed: the same account number always recreates the same key,
+                // so a seed-phrase restore recovers the identity.
+                if Ui.create-mode == 1: create-account-input := Input {
+                    label: "Account number (same number = same key)";
+                    placeholder: "0";
+                    value <=> Ui.create-account;
+                    submitted => {
+                        create-account-input.clear-focus();
+                    }
+                }
+                // The date has to be a fixed constant: the OpenPGP fingerprint commits to
+                // the creation timestamp, so a "real" date would break re-derivation.
+                if Ui.create-mode == 1: Text {
+                    text: "Derived keys are always dated 2009-01-03. The date is part of the key's fingerprint, so it must be fixed for the same account to re-create the same key. It is public metadata and does not weaken the key.";
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+
+                Button {
+                    full-width: true;
+                    text: Ui.create-mode == 1 ? "Derive" : "Generate";
+                    clicked => {
+                        if (Ui.create-mode == 1) {
+                            Callbacks.create-derived-key(Ui.create-name, Ui.create-email, Ui.create-account, Ui.create-pass);
+                        } else {
+                            Callbacks.create-key(Ui.create-name, Ui.create-email, Ui.create-bits-index, Ui.create-pass);
+                        }
+                    }
+                }
         }
     }
-
-    Rectangle { vertical-stretch: 1; }
 }
 
 export component AppWindow inherits Window {
