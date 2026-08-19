@@ -13,7 +13,7 @@ use slint_keyos_platform::navigation::open_qr_scanner;
 use slint_keyos_platform::qrcode;
 use slint_keyos_platform::slint::{Color, ComponentHandle, ModelRc, Timer, VecModel};
 
-app_ui2!("PGP Keychain");
+app_ui2!("OpenPGP Keys");
 security::use_api!();
 
 /// App-managed keychain directory on Internal (User) storage.

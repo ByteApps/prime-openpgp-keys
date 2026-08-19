@@ -1,4 +1,4 @@
-//! UI-free OpenPGP operations for the PGP Keychain app.
+//! UI-free OpenPGP operations for the OpenPGP Keys app (formerly "PGP Keychain").
 //!
 //! Lives in its own crate so it can be unit-tested with plain `cargo test
 //! -p pgp-core` on the host — the app crate itself only compiles through the
@@ -446,6 +446,9 @@ pub const DERIVED_KEY_CREATED_AT: u32 = 1_231_006_505;
 
 /// Domain-separation salt for the HKDF expansion of the device app-seed.
 /// Versioned; bump only alongside a new derivation scheme, never in place.
+/// The "prime-pgp-keychain" prefix is the app's original name and is FROZEN:
+/// the 2026-08-19 rename to prime-openpgp-keys deliberately left it unchanged,
+/// because every seed-derived key's fingerprint depends on it.
 const DERIVATION_SALT: &[u8] = b"prime-pgp-keychain/derive/v1";
 
 /// Deterministically derive an Ed25519 (sign+certify) key with a Cv25519

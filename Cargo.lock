@@ -5221,7 +5221,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "prime-pgp-keychain"
+name = "prime-openpgp-keys"
 version = "0.1.0"
 dependencies = [
  "foundation-themes",

@@ -1,8 +1,8 @@
-# <img src="resources/icon.svg" alt="" width="42" align="top" /> PGP Keychain
+# <img src="resources/icon.svg" alt="" width="42" align="top" /> OpenPGP Keys
 
 **Security · OpenPGP** — a complete OpenPGP key manager that lives where your keys belong: on secure hardware, offline.
 
-PGP Keychain turns your Passport Prime into a personal certificate authority. Create keys, import the ones you already have, sign and encrypt files, and answer signing requests over nothing but QR codes — all on a device with no network stack and storage encrypted by your PIN. Best of all: keys can be **derived from your device's master seed**, so restoring your seed phrase restores your PGP identity too.
+OpenPGP Keys turns your Passport Prime into a personal certificate authority. Create keys, import the ones you already have, sign and encrypt files, and answer signing requests over nothing but QR codes — all on a device with no network stack and storage encrypted by your PIN. Best of all: keys can be **derived from your device's master seed**, so restoring your seed phrase restores your OpenPGP identity too.
 
 <p align="center">
   <img src="screenshots/keychain.png" alt="Keychain list" width="280">
@@ -27,7 +27,7 @@ Keys live as armored files on Internal storage — on hardware, a volume encrypt
 
 ## Install on your Passport Prime
 
-Grab **`prime-pgp-keychain.app`** from the [latest release](https://github.com/ByteApps/prime-pgp-keychain/releases/latest), copy it to a USB drive or the Airlock, and install it from **Settings > Apps > Install App** (KeyOS 1.4 or later).
+Grab the **`.app` archive** from the [latest release](https://github.com/ByteApps/prime-openpgp-keys/releases/latest), copy it to a USB drive or the Airlock, and install it from **Settings > Apps > Install App** (KeyOS 1.4 or later).
 
 The first ByteApps app you install also needs our publisher certificate trusted once: download [`byteapps.crt`](https://byteapps.com/byteapps.crt) (also attached to every release), copy it over the same way, and add it under **Settings > Apps > Allowed Publishers**. Before trusting it, check that its fingerprint matches the one published at [byteapps.com](https://byteapps.com/#verify):
 
