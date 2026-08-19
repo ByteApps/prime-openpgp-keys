@@ -210,6 +210,53 @@ fn generate_rsa4096_roundtrip() {
 }
 
 #[test]
+fn generate_ed25519_roundtrip() {
+    let key = generate_ed25519("Gen Ed", "gen-ed@example.com", Some("gen-pass")).unwrap();
+    let reparsed = parse_one_bytes(export_armored(&PgpKey::Secret(key)).unwrap().as_bytes());
+    let info = key_info(&reparsed);
+    assert!(info.has_secret);
+    assert_eq!(info.algorithm, "EdDSA");
+    assert_eq!(info.size_or_curve, "Curve25519");
+    assert_eq!(info.subkeys.len(), 1);
+    assert_eq!(info.subkeys[0].algorithm, "ECDH");
+    assert!(info.subkeys[0].usage.contains("encrypt"));
+    if let PgpKey::Secret(sk) = &reparsed {
+        assert!(check_passphrase(sk, "gen-pass").is_ok());
+        let data = b"ed payload";
+        let sig = sign_detached(sk, "gen-pass", data).unwrap();
+        use pgp::composed::{Deserializable, DetachedSignature};
+        DetachedSignature::from_bytes(&sig[..])
+            .unwrap()
+            .verify(&sk.primary_key.public_key(), data)
+            .unwrap();
+        let cipher = encrypt_bytes(&reparsed, "t.txt", data.to_vec(), None).unwrap();
+        assert_eq!(decrypt_bytes(sk, "gen-pass", cipher).unwrap(), data);
+    }
+}
+
+#[test]
+fn generate_nistp_all_curves_roundtrip() {
+    for (curve, want) in [
+        (NistCurve::P256, "P256"),
+        (NistCurve::P384, "P384"),
+        (NistCurve::P521, "P521"),
+    ] {
+        let key = generate_nistp(curve, "Gen NistP", "nistp@example.com", None).unwrap();
+        let reparsed = parse_one_bytes(export_armored(&PgpKey::Secret(key)).unwrap().as_bytes());
+        let info = key_info(&reparsed);
+        assert_eq!(info.algorithm, "ECDSA", "{want}");
+        assert_eq!(info.size_or_curve, want);
+        assert_eq!(info.subkeys[0].algorithm, "ECDH", "{want}");
+        assert_eq!(info.subkeys[0].size_or_curve, want);
+        if let PgpKey::Secret(sk) = &reparsed {
+            let data = b"nistp payload";
+            let cipher = encrypt_bytes(&reparsed, "t.txt", data.to_vec(), None).unwrap();
+            assert_eq!(decrypt_bytes(sk, "", cipher).unwrap(), data, "{want}");
+        }
+    }
+}
+
+#[test]
 fn generate_p521_roundtrip() {
     let key = generate_p521("Gen P521", "p521@example.com", Some("gen-pass")).unwrap();
     let armored = export_armored(&PgpKey::Secret(key.clone())).unwrap();

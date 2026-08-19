@@ -6,7 +6,7 @@ Direct dependencies of this app and its `pgp-core` library. The complete transit
 
 | Library | Version | License | Used for |
 |---|---|---|---|
-| [pgp](https://github.com/rpgp/rpgp) (rpgp) | 0.20.0 (pinned) | MIT OR Apache-2.0 | Pure-Rust OpenPGP: parsing, key generation, signing, encryption |
+| [pgp](https://github.com/rpgp/rpgp) (rpgp) | 0.20.0 (pinned) | MIT OR Apache-2.0 | Pure-Rust OpenPGP: parsing, key generation, signing, encryption. The `draft-pqc` feature is enabled for the RFC 9980 post-quantum hybrid, pulling [ml-kem](https://crates.io/crates/ml-kem), [ml-dsa](https://crates.io/crates/ml-dsa) and [slh-dsa](https://crates.io/crates/slh-dsa) (RustCrypto, Apache-2.0 OR MIT) into the graph |
 | [rsa](https://crates.io/crates/rsa) | 0.9 | MIT OR Apache-2.0 | RSA key introspection (modulus sizes; same copy rpgp uses) |
 | [hkdf](https://crates.io/crates/hkdf) | 0.12 | MIT OR Apache-2.0 | Seed-derived keys: HKDF-SHA256 expansion of the device app-seed |
 | [sha2](https://crates.io/crates/sha2) | 0.10 | MIT OR Apache-2.0 | SHA-256 for derivation |

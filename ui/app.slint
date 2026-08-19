@@ -688,11 +688,14 @@ component CreateView inherits VerticalLayout {
                         horizontal-stretch: 1;
                         options: ["Random", "From seed"];
                         selected-index <=> Ui.create-mode;
-                        // Switching key types re-defaults the algorithm to
-                        // the strongest option rather than whatever was left
-                        // selected.
+                        // Switching key types re-defaults every algorithm
+                        // choice to the strongest option rather than
+                        // whatever was left selected.
                         changed selected-index => {
-                            Ui.create-bits-index = 3;
+                            Ui.create-algo = 2;
+                            Ui.create-rsa-bits-index = 2;
+                            Ui.create-nistp-index = 2;
+                            Ui.create-seed-algo = 1;
                         }
                     }
                 }
@@ -708,27 +711,89 @@ component CreateView inherits VerticalLayout {
                     height: 64px;
                     SegmentedControl {
                         horizontal-stretch: 1;
-                        options: ["2048", "3072", "4096", "P-521"];
-                        selected-index <=> Ui.create-bits-index;
+                        options: ["RSA", "Ed25519", "NIST P", "PQC"];
+                        selected-index <=> Ui.create-algo;
+                    }
+                }
+                if Ui.create-mode == 0 && Ui.create-algo == 0: Text {
+                    text: "Key size";
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+                if Ui.create-mode == 0 && Ui.create-algo == 0: HorizontalLayout {
+                    height: 64px;
+                    SegmentedControl {
+                        horizontal-stretch: 1;
+                        options: ["2048", "3072", "4096"];
+                        selected-index <=> Ui.create-rsa-bits-index;
+                    }
+                }
+                if Ui.create-mode == 0 && Ui.create-algo == 2: Text {
+                    text: "Curve";
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+                if Ui.create-mode == 0 && Ui.create-algo == 2: HorizontalLayout {
+                    height: 64px;
+                    SegmentedControl {
+                        horizontal-stretch: 1;
+                        options: ["P-256", "P-384", "P-521"];
+                        selected-index <=> Ui.create-nistp-index;
                     }
                 }
                 // One-glance strength/compatibility note for the selected algorithm.
                 if Ui.create-mode == 0: Text {
-                    text: Ui.create-bits-index == 0
-                        ? "RSA-2048 — about 112-bit strength. Universally supported; the smallest and quickest RSA."
-                        : Ui.create-bits-index == 1
-                        ? "RSA-3072 — about 128-bit strength. Universally supported."
-                        : Ui.create-bits-index == 2
-                        ? "RSA-4096 — about 140-bit strength. Universally supported; slowest to generate."
-                        : "NIST P-521 (secp521r1; ECDSA + ECDH) — about 256-bit strength, the strongest option. Fast; needs ECC-aware PGP software (GnuPG 2.1+).";
+                    text: Ui.create-algo == 0
+                        ? "RSA — classic and universally supported. 2048 ≈ 112-bit, 3072 ≈ 128-bit, 4096 ≈ 140-bit strength; bigger is slower to generate."
+                        : Ui.create-algo == 1
+                        ? "Ed25519 + Curve25519 — about 128-bit strength. The modern default: small, fast, supported by current PGP software. The same pair From-seed keys use."
+                        : Ui.create-algo == 2
+                        ? (Ui.create-nistp-index == 0
+                            ? "NIST P-256 (secp256r1; ECDSA + ECDH) — about 128-bit strength. The most widely deployed NIST curve (GnuPG 2.1+)."
+                            : Ui.create-nistp-index == 1
+                            ? "NIST P-384 (secp384r1; ECDSA + ECDH) — about 192-bit strength, the CNSA-suite curve (GnuPG 2.1+)."
+                            : "NIST P-521 (secp521r1; ECDSA + ECDH) — about 256-bit strength, the strongest classical option. Fast; needs ECC-aware PGP software (GnuPG 2.1+).")
+                        : "Experimental — post-quantum hybrid (RFC 9980): Ed25519 signing + ML-KEM-768+X25519 encryption, sealed against future quantum computers. Needs RFC 9980-aware software; older PGP warns.";
                     color: Theme.palette-muted;
                     font-family: "Montserrat";
                     font-size: 13px;
                     wrap: word-wrap;
                 }
-                // From-seed keys are Ed25519, deterministically derived from the device
-                // master seed: the same account number always recreates the same key,
-                // so a seed-phrase restore recovers the identity.
+                if Ui.create-mode == 1: Text {
+                    text: "Algorithm";
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+                if Ui.create-mode == 1: HorizontalLayout {
+                    height: 64px;
+                    SegmentedControl {
+                        horizontal-stretch: 1;
+                        options: ["Ed25519", "P-521"];
+                        selected-index <=> Ui.create-seed-algo;
+                    }
+                }
+                // The algorithm choice is part of the recovery recipe: each
+                // algorithm derives an independent key from the same account.
+                if Ui.create-mode == 1: Text {
+                    text: (Ui.create-seed-algo == 1
+                        ? "NIST P-521 (secp521r1; ECDSA + ECDH) — about 256-bit strength, the strongest option. Needs ECC-aware PGP software (GnuPG 2.1+)."
+                        : "Ed25519 + Curve25519 — about 128-bit strength. The modern default, and this app's original derivation scheme.")
+                        + " The same account number re-creates the same key only with the same algorithm — remember both.";
+                    color: Theme.palette-muted;
+                    font-family: "Montserrat";
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                // From-seed keys are deterministically derived from the device
+                // master seed: the same account number + algorithm always
+                // recreates the same key, so a seed-phrase restore recovers
+                // the identity.
                 if Ui.create-mode == 1: create-account-input := Input {
                     label: "Account number (same number = same key)";
                     placeholder: "0";
@@ -752,9 +817,9 @@ component CreateView inherits VerticalLayout {
                     text: Ui.create-mode == 1 ? "Derive" : "Generate";
                     clicked => {
                         if (Ui.create-mode == 1) {
-                            Callbacks.create-derived-key(Ui.create-name, Ui.create-email, Ui.create-account, Ui.create-pass);
+                            Callbacks.create-derived-key(Ui.create-name, Ui.create-email, Ui.create-account, Ui.create-seed-algo, Ui.create-pass);
                         } else {
-                            Callbacks.create-key(Ui.create-name, Ui.create-email, Ui.create-bits-index, Ui.create-pass);
+                            Callbacks.create-key(Ui.create-name, Ui.create-email, Ui.create-algo, Ui.create-rsa-bits-index, Ui.create-nistp-index, Ui.create-pass);
                         }
                     }
                 }

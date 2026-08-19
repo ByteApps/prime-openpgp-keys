@@ -89,3 +89,37 @@ fn derived_key_supports_edit_operations() {
     // Fingerprint is untouched by all edits.
     assert_eq!(fpr(&added), fpr(&key));
 }
+
+// --- P-521 from seed (derive_p521) -----------------------------------------
+
+#[test]
+fn derive_p521_is_deterministic_and_domain_separated() {
+    let a = derive_p521(&[7u8; 32], 3, "P", "p@example.com", None).unwrap();
+    let b = derive_p521(&[7u8; 32], 3, "Q", "q@example.com", Some("pw")).unwrap();
+    assert_eq!(fpr(&a), fpr(&b), "uid/passphrase must not change the key");
+
+    // different index and different seed both change the key
+    let c = derive_p521(&[7u8; 32], 4, "P", "p@example.com", None).unwrap();
+    let d = derive_p521(&[8u8; 32], 3, "P", "p@example.com", None).unwrap();
+    assert_ne!(fpr(&a), fpr(&c));
+    assert_ne!(fpr(&a), fpr(&d));
+
+    // and the P-521 stream is independent of the Ed25519 one: same seed,
+    // same index, different algorithm => different key
+    let e = derive_ed25519(&[7u8; 32], 3, "P", "p@example.com", None).unwrap();
+    assert_ne!(fpr(&a), fpr(&e));
+}
+
+#[test]
+fn derive_p521_roundtrips_and_passphrase_works() {
+    let key = derive_p521(&[9u8; 32], 0, "P", "p@example.com", Some("d-pass")).unwrap();
+    let armored = export_armored(&PgpKey::Secret(key)).unwrap();
+    let mut keys = parse_keys(armored.as_bytes()).unwrap();
+    let PgpKey::Secret(sk) = keys.remove(0) else { panic!("expected secret") };
+    assert!(check_passphrase(&sk, "d-pass").is_ok());
+    assert!(check_passphrase(&sk, "nope").is_err());
+    let info = key_info(&PgpKey::Secret(sk));
+    assert_eq!(info.algorithm, "ECDSA");
+    assert_eq!(info.size_or_curve, "P521");
+    assert_eq!(info.created_at, 1_231_006_505);
+}

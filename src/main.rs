@@ -448,7 +448,10 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 u.set_create_name("".into());
                 u.set_create_email("".into());
                 u.set_create_pass("".into());
-                u.set_create_bits_index(3); // default to the strongest algorithm (P-521)
+                u.set_create_algo(2); // default to the strongest algorithm (P-521)
+                u.set_create_rsa_bits_index(2);
+                u.set_create_nistp_index(2);
+                u.set_create_seed_algo(1);
                 u.set_create_mode(0);
                 u.set_create_account("0".into());
                 show_info(&ui, "");
@@ -474,22 +477,33 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let ui_weak = ui_weak.clone();
         let refresh_keys = refresh_keys.clone();
         let open_key = open_key.clone();
-        callbacks.on_create_key(move |name, email, bits_index, pass| {
+        callbacks.on_create_key(move |name, email, algo, rsa_bits_index, nistp_index, pass| {
             let Some(ui) = ui_weak.upgrade() else { return };
             let name = name.to_string();
             let email = email.to_string();
             let pass = pass.to_string();
-            // Algorithm row: indexes 0-2 are RSA sizes, 3 is the NIST
-            // P-521 tier (ECDSA primary + ECDH subkey).
-            let bits: Option<u32> = match bits_index {
-                1 => Some(3072),
-                2 => Some(4096),
-                3 => None,
-                _ => Some(2048),
+            // Algorithm row: 0=RSA (size from the Key size row), 1=Ed25519,
+            // 2=NIST P (curve from the Curve row), 3=PQC hybrid (Ed25519 +
+            // ML-KEM-768+X25519).
+            let bits: u32 = match rsa_bits_index {
+                0 => 2048,
+                1 => 3072,
+                _ => 4096,
             };
-            let (algo_label, algo_log) = match bits {
-                Some(b) => (format!("RSA-{b}"), format!("rsa{b}")),
-                None => ("P-521".to_string(), "p521".to_string()),
+            let curve = match nistp_index {
+                0 => pgp_core::NistCurve::P256,
+                1 => pgp_core::NistCurve::P384,
+                _ => pgp_core::NistCurve::P521,
+            };
+            let (algo_label, algo_log) = match algo {
+                1 => ("Ed25519".to_string(), "ed25519".to_string()),
+                2 => match curve {
+                    pgp_core::NistCurve::P256 => ("P-256".to_string(), "p256".to_string()),
+                    pgp_core::NistCurve::P384 => ("P-384".to_string(), "p384".to_string()),
+                    pgp_core::NistCurve::P521 => ("P-521".to_string(), "p521".to_string()),
+                },
+                3 => ("PQC hybrid".to_string(), "pqc".to_string()),
+                _ => (format!("RSA-{bits}"), format!("rsa{bits}")),
             };
             if name.trim().is_empty() || email.trim().is_empty() {
                 show_error(&ui, "Name and email are required".to_string());
@@ -509,9 +523,11 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             Timer::single_shot(Duration::from_millis(150), move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let passphrase = if pass.is_empty() { None } else { Some(pass.as_str()) };
-                let result = match bits {
-                    Some(b) => pgp_core::generate_rsa(b, name.trim(), email.trim(), passphrase),
-                    None => pgp_core::generate_p521(name.trim(), email.trim(), passphrase),
+                let result = match algo {
+                    1 => pgp_core::generate_ed25519(name.trim(), email.trim(), passphrase),
+                    2 => pgp_core::generate_nistp(curve, name.trim(), email.trim(), passphrase),
+                    3 => pgp_core::generate_pqc_hybrid(name.trim(), email.trim(), passphrase),
+                    _ => pgp_core::generate_rsa(bits, name.trim(), email.trim(), passphrase),
                 }
                 .map_err(|e| e.0)
                     .and_then(|key| {
@@ -542,7 +558,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let ui_weak = ui_weak.clone();
         let refresh_keys = refresh_keys.clone();
         let open_key = open_key.clone();
-        callbacks.on_create_derived_key(move |name, email, account, pass| {
+        callbacks.on_create_derived_key(move |name, email, account, algo, pass| {
             let Some(ui) = ui_weak.upgrade() else { return };
             let name = name.to_string();
             let email = email.to_string();
@@ -559,6 +575,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 }
             };
 
+            // 0 = Ed25519 (the original scheme), 1 = P-521 (domain-separated).
+            let algo_log = if algo == 1 { "p521-derived" } else { "ed25519-derived" };
             let u = ui.global::<Ui>();
             u.set_busy_text(format!("Deriving key #{index} from device seed…").into());
             u.set_busy(true);
@@ -574,8 +592,12 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     .app_seed()
                     .map_err(|_| "Device locked or seed unavailable".to_string())
                     .and_then(|app_seed| {
-                        pgp_core::derive_ed25519(&app_seed, index, name.trim(), email.trim(), passphrase)
-                            .map_err(|e| e.0)
+                        if algo == 1 {
+                            pgp_core::derive_p521(&app_seed, index, name.trim(), email.trim(), passphrase)
+                        } else {
+                            pgp_core::derive_ed25519(&app_seed, index, name.trim(), email.trim(), passphrase)
+                        }
+                        .map_err(|e| e.0)
                     })
                     .and_then(|key| {
                         let key = PgpKey::Secret(key);
@@ -585,13 +607,13 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 match result {
                     Ok((filename, key)) => {
                         let info = pgp_core::key_info(&key);
-                        log::info!("cb: create-key ed25519-derived idx={index} ok fpr={}", info.fingerprint);
+                        log::info!("cb: create-key {algo_log} idx={index} ok fpr={}", info.fingerprint);
                         refresh_keys();
                         open_key(filename);
                         show_info(&ui, &format!("Key #{index} derived from device seed"));
                     }
                     Err(e) => {
-                        log::info!("cb: create-key ed25519-derived idx={index} err={e}");
+                        log::info!("cb: create-key {algo_log} idx={index} err={e}");
                         show_error(&ui, e);
                     }
                 }

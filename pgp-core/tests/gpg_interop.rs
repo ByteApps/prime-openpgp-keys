@@ -527,3 +527,61 @@ fn we_encrypt_p521_gpg_decrypts() {
     assert!(ok, "gpg -d of our P-521 message failed: {err}");
     assert_eq!(out.as_bytes(), &plain[..], "gpg-decrypted plaintext mismatch");
 }
+
+#[test]
+fn gpg_accepts_our_random_ed25519_key() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = generate_ed25519("Ed Interop", "ed-interop@example.com", Some("s3cret")).unwrap();
+    let info = key_info(&PgpKey::Secret(key.clone()));
+    gpg.import(&export_armored(&PgpKey::Secret(key)).unwrap());
+
+    let (ok, out, err) = gpg.run(&["--check-sigs", "--with-colons", &info.fingerprint], b"");
+    assert!(ok, "--check-sigs failed: {err}");
+    assert!(out.lines().any(|l| l.starts_with("sig:!")), "no valid self-sig: {out}");
+
+    let (ok, _, err) = gpg.run(
+        &["--passphrase", "s3cret", "--local-user", &info.fingerprint, "--sign", "--output", "/dev/null"],
+        b"payload",
+    );
+    assert!(ok, "gpg --sign with our random Ed25519 key failed: {err}");
+}
+
+#[test]
+fn gpg_accepts_seed_derived_p521_key() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = derive_p521(&[0x42; 32], 0, "Derived P521", "derived-p521@example.com", Some("d-pass"))
+        .unwrap();
+    let info = key_info(&PgpKey::Secret(key.clone()));
+    gpg.import(&export_armored(&PgpKey::Secret(key)).unwrap());
+
+    let (ok, out, err) = gpg.run(&["--check-sigs", "--with-colons", &info.fingerprint], b"");
+    assert!(ok, "--check-sigs failed: {err}");
+    assert!(out.lines().any(|l| l.starts_with("sig:!")), "no valid self-sig: {out}");
+
+    let (ok, _, err) = gpg.run(
+        &["--passphrase", "d-pass", "--local-user", &info.fingerprint, "--sign", "--output", "/dev/null"],
+        b"payload",
+    );
+    assert!(ok, "gpg --sign with derived P-521 key failed: {err}");
+}
+
+#[test]
+fn gpg_accepts_our_p384_key() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = generate_nistp(NistCurve::P384, "P384 Interop", "p384@example.com", Some("s3cret")).unwrap();
+    let info = key_info(&PgpKey::Secret(key.clone()));
+    gpg.import(&export_armored(&PgpKey::Secret(key)).unwrap());
+
+    let (ok, out, err) = gpg.run(&["--check-sigs", "--with-colons", &info.fingerprint], b"");
+    assert!(ok, "--check-sigs failed: {err}");
+    assert!(out.lines().any(|l| l.starts_with("sig:!")), "no valid self-sig: {out}");
+
+    let (ok, _, err) = gpg.run(
+        &["--passphrase", "s3cret", "--local-user", &info.fingerprint, "--sign", "--output", "/dev/null"],
+        b"payload",
+    );
+    assert!(ok, "gpg --sign with our P-384 key failed: {err}");
+}

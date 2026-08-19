@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 # panic parsing crafted RSA secret-key packets — we parse untrusted .asc).
 # No default features: drops bzip2 message decompression, irrelevant for
 # key management. No C deps, no rayon, so it cross-compiles like hayro/image.
-pgp = { version = "=0.20.0", default-features = false }
+pgp = { version = "=0.20.0", default-features = false, features = ["draft-pqc"] }
 rand = "0.8"
 # Same version rpgp uses — only pulled in for the PublicKeyParts trait so we
 # can report RSA modulus sizes; cargo unifies it with rpgp's copy.

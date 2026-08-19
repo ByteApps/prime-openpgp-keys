@@ -14,7 +14,7 @@ OpenPGP Keys turns your Passport Prime into a personal certificate authority. Cr
 
 ## Features
 
-- **Create keys** — random RSA (2048/3072/4096) or NIST P-521 (secp521r1 — the strongest classical pair, ~256-bit security, the pre-selected default), or **"From seed"**: an Ed25519 key (with encryption subkey) derived from your wallet master seed. The same account number always re-creates the same key and fingerprint — on this device, or on a new one after a seed-phrase restore.
+- **Create keys** — random RSA (2048/3072/4096), Ed25519, NIST P-256/P-384/P-521 (secp521r1 — the strongest classical pair, ~256-bit security — is the pre-selected default), or an experimental **post-quantum hybrid** (Ed25519 signing + ML-KEM-768+X25519 encryption, RFC 9980), or **"From seed"** (Ed25519 or P-521): an Ed25519 key (with encryption subkey) derived from your wallet master seed. The same account number always re-creates the same key and fingerprint — on this device, or on a new one after a seed-phrase restore.
 - **Import anything standard** — armored `.asc` files (public or secret) from Internal, Airlock, or USB. RSA, DSA/ElGamal, ECDSA/ECDH, Ed25519 all parse, multi-key files work, and importing a public copy never downgrades a stored secret key.
 - **Inspect and edit** — fingerprints, subkeys, user IDs, expiration at a glance; extend or clear expiration, add/remove user IDs, change or remove the passphrase — all as proper self-signature rebuilds that GnuPG verifies.
 - **Sign files** — pick any file on the device and get a detached `.sig` next to it, identical to `gpg --detach-sign` output and verifiable anywhere.

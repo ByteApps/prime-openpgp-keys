@@ -394,21 +394,52 @@ pub fn generate_rsa(
     Ok(key)
 }
 
-/// Generate a NIST P-521 sign+certify primary key (ECDSA) with a P-521
+/// NIST prime curve for [`generate_nistp`], strongest last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NistCurve {
+    /// secp256r1, ~128-bit security.
+    P256,
+    /// secp384r1, ~192-bit security (CNSA).
+    P384,
+    /// secp521r1, ~256-bit security.
+    P521,
+}
+
+impl NistCurve {
+    fn ecc(self) -> ECCCurve {
+        match self {
+            NistCurve::P256 => ECCCurve::P256,
+            NistCurve::P384 => ECCCurve::P384,
+            NistCurve::P521 => ECCCurve::P521,
+        }
+    }
+}
+
+/// Generate a NIST P-521 pair — see [`generate_nistp`].
+pub fn generate_p521(
+    name: &str,
+    email: &str,
+    passphrase: Option<&str>,
+) -> Result<SignedSecretKey, PgpError> {
+    generate_nistp(NistCurve::P521, name, email, passphrase)
+}
+
+/// Generate a NIST-curve sign+certify primary key (ECDSA) with a same-curve
 /// ECDH encryption subkey.
 ///
-/// The strongest classical pair this crate offers (~256-bit security vs
-/// ~128 for Curve25519 and ~140 for RSA-4096). Interops as ordinary v4
-/// RFC 6637 keys with GnuPG >= 2.1; signatures hash with SHA-512 via the
-/// advertised preferences.
-pub fn generate_p521(
+/// P-521 is the strongest classical pair this crate offers (~256-bit
+/// security vs ~128 for Curve25519 and ~140 for RSA-4096). All three curves
+/// interop as ordinary v4 RFC 6637 keys with GnuPG >= 2.1; signatures hash
+/// with SHA-512/384 via the advertised preferences.
+pub fn generate_nistp(
+    curve: NistCurve,
     name: &str,
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
     let mut subkey = SubkeyParamsBuilder::default();
     subkey
-        .key_type(KeyType::ECDH(ECCCurve::P521))
+        .key_type(KeyType::ECDH(curve.ecc()))
         .can_encrypt(EncryptionCaps::All);
     if let Some(pw) = passphrase {
         subkey.passphrase(Some(pw.to_string()));
@@ -419,7 +450,92 @@ pub fn generate_p521(
 
     let mut params = SecretKeyParamsBuilder::default();
     params
-        .key_type(KeyType::ECDSA(ECCCurve::P521))
+        .key_type(KeyType::ECDSA(curve.ecc()))
+        .can_certify(true)
+        .can_sign(true)
+        .primary_user_id(format!("{name} <{email}>"))
+        .subkeys(vec![subkey]);
+    advertise_algorithm_preferences(&mut params);
+    if let Some(pw) = passphrase {
+        params.passphrase(Some(pw.to_string()));
+    }
+    let params = params
+        .build()
+        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+
+    let key = params.generate(thread_rng())?;
+    key.verify_bindings()?;
+    Ok(key)
+}
+
+/// Generate a random Ed25519 sign+certify primary key with a Cv25519
+/// encryption subkey — the same pair "From seed" derives, but from the
+/// system RNG. v4 "legacy" EdDSA/ECDH format for GnuPG 2.2 interop.
+pub fn generate_ed25519(
+    name: &str,
+    email: &str,
+    passphrase: Option<&str>,
+) -> Result<SignedSecretKey, PgpError> {
+    let mut subkey = SubkeyParamsBuilder::default();
+    subkey
+        .key_type(KeyType::ECDH(ECCCurve::Curve25519Legacy))
+        .can_encrypt(EncryptionCaps::All);
+    if let Some(pw) = passphrase {
+        subkey.passphrase(Some(pw.to_string()));
+    }
+    let subkey = subkey
+        .build()
+        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+
+    let mut params = SecretKeyParamsBuilder::default();
+    params
+        .key_type(KeyType::Ed25519Legacy)
+        .can_certify(true)
+        .can_sign(true)
+        .primary_user_id(format!("{name} <{email}>"))
+        .subkeys(vec![subkey]);
+    advertise_algorithm_preferences(&mut params);
+    if let Some(pw) = passphrase {
+        params.passphrase(Some(pw.to_string()));
+    }
+    let params = params
+        .build()
+        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+
+    let key = params.generate(thread_rng())?;
+    key.verify_bindings()?;
+    Ok(key)
+}
+
+/// Generate a post-quantum hybrid key: Ed25519 sign+certify primary with an
+/// ML-KEM-768+X25519 composite encryption subkey (RFC 9980, algorithm 35).
+///
+/// Algorithm 35 is the one RFC 9980 algorithm permitted on v4 keys, which
+/// keeps this key compatible with the app's v4 world: the encryption is
+/// post-quantum (harvest-now-decrypt-later resistant), the signature half
+/// stays classical Ed25519 (the ML-DSA algorithms are v6-only). Only
+/// RFC 9980-aware software can encrypt to or decrypt with the subkey;
+/// older GnuPG imports the key, signs/verifies with the primary, and warns
+/// about the unknown subkey algorithm.
+pub fn generate_pqc_hybrid(
+    name: &str,
+    email: &str,
+    passphrase: Option<&str>,
+) -> Result<SignedSecretKey, PgpError> {
+    let mut subkey = SubkeyParamsBuilder::default();
+    subkey
+        .key_type(KeyType::MlKem768X25519)
+        .can_encrypt(EncryptionCaps::All);
+    if let Some(pw) = passphrase {
+        subkey.passphrase(Some(pw.to_string()));
+    }
+    let subkey = subkey
+        .build()
+        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+
+    let mut params = SecretKeyParamsBuilder::default();
+    params
+        .key_type(KeyType::Ed25519Legacy)
         .can_certify(true)
         .can_sign(true)
         .primary_user_id(format!("{name} <{email}>"))
@@ -533,6 +649,83 @@ pub fn derive_ed25519(
     let mut params = SecretKeyParamsBuilder::default();
     params
         .key_type(KeyType::Ed25519Legacy)
+        .can_certify(true)
+        .can_sign(true)
+        .created_at(created)
+        .primary_user_id(format!("{name} <{email}>"))
+        .subkeys(vec![subkey]);
+    advertise_algorithm_preferences(&mut params);
+    let params = params
+        .build()
+        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+
+    let key = params.generate(&mut rng)?;
+
+    // Passphrase protection is applied outside the deterministic stream.
+    let key = match passphrase {
+        Some(pw) if !pw.is_empty() => {
+            let mut sys_rng = thread_rng();
+            let pw = Password::from(pw);
+            let mut k = key;
+            k.primary_key.set_password(&mut sys_rng, &pw)?;
+            for sub in &mut k.secret_subkeys {
+                sub.key.set_password(&mut sys_rng, &pw)?;
+            }
+            k
+        }
+        _ => key,
+    };
+
+    key.verify_bindings()?;
+    Ok(key)
+}
+
+/// Deterministically derive a NIST P-521 (ECDSA sign+certify) key with a
+/// P-521 ECDH encryption subkey from the device app-seed and a key index.
+///
+/// A deliberate SIBLING of [`derive_ed25519`], not a refactor of it: that
+/// function's byte behaviour is FROZEN (fingerprints depend on it), so this
+/// one duplicates the shape with its own HKDF info prefix. The
+/// `pgp-key-p521/` prefix domain-separates the two streams — the same
+/// account number yields independent Ed25519 and P-521 keys, and existing
+/// Ed25519 derivations are untouched. Same salt, same fixed creation time,
+/// same "passphrase applied outside the deterministic stream" rule.
+///
+/// Reproducibility rests on rpgp `=0.20.0` consuming the seeded stream
+/// identically forever (same contract as derive_ed25519); the pinned-
+/// fingerprint tests in tests/entropy.rs gate any rpgp bump.
+pub fn derive_p521(
+    app_seed: &[u8; 32],
+    index: u32,
+    name: &str,
+    email: &str,
+    passphrase: Option<&str>,
+) -> Result<SignedSecretKey, PgpError> {
+    use hkdf::Hkdf;
+    use rand_chacha::rand_core::SeedableRng;
+    use sha2::Sha256;
+
+    let hk = Hkdf::<Sha256>::new(Some(DERIVATION_SALT), app_seed);
+    let mut key_seed = [0u8; 32];
+    let mut info = Vec::with_capacity(17);
+    info.extend_from_slice(b"pgp-key-p521/");
+    info.extend_from_slice(&index.to_le_bytes());
+    hk.expand(&info, &mut key_seed)
+        .map_err(|e| PgpError(format!("Key derivation failed: {e}")))?;
+    let mut rng = rand_chacha::ChaCha20Rng::from_seed(key_seed);
+
+    let created = Timestamp::from_secs(DERIVED_KEY_CREATED_AT);
+
+    let subkey = SubkeyParamsBuilder::default()
+        .key_type(KeyType::ECDH(ECCCurve::P521))
+        .can_encrypt(EncryptionCaps::All)
+        .created_at(created)
+        .build()
+        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+
+    let mut params = SecretKeyParamsBuilder::default();
+    params
+        .key_type(KeyType::ECDSA(ECCCurve::P521))
         .can_certify(true)
         .can_sign(true)
         .created_at(created)

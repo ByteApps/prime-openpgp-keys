@@ -89,10 +89,17 @@ export global Ui {
     in-out property <string> create-name: "";
     in-out property <string> create-email: "";
     in-out property <string> create-pass: "";
-    // 0=RSA-2048 1=RSA-3072 2=RSA-4096 3=P-521. Defaults to the strongest
-    // (P-521); show-create and the Key type toggle both reset it to 3.
-    in-out property <int> create-bits-index: 3;
-    in-out property <int> create-mode: 0;         // 0 = random, 1 = from seed (Ed25519)
+    // Random-mode algorithm: 0=RSA 1=Ed25519 2=P-521 3=PQC hybrid (Ed25519
+    // + ML-KEM-768+X25519, RFC 9980). Defaults to the strongest classical
+    // (P-521); show-create and the Key type toggle both re-default it.
+    in-out property <int> create-algo: 2;
+    // RSA size when create-algo == 0: 0=2048 1=3072 2=4096 (strongest first).
+    in-out property <int> create-rsa-bits-index: 2;
+    // NIST curve when create-algo == 2: 0=P-256 1=P-384 2=P-521 (strongest).
+    in-out property <int> create-nistp-index: 2;
+    // From-seed algorithm: 0=Ed25519 1=P-521 (defaults to the strongest).
+    in-out property <int> create-seed-algo: 1;
+    in-out property <int> create-mode: 0;         // 0 = random, 1 = from seed
     in-out property <string> create-account: "0"; // derivation index for from-seed mode
 
     // Busy overlay (key generation).
@@ -117,8 +124,8 @@ export global Callbacks {
 
     callback show-create();
     callback cancel-create();
-    callback create-key(string, string, int, string); // name, email, bits-index, passphrase
-    callback create-derived-key(string, string, string, string); // name, email, account index, passphrase
+    callback create-key(string, string, int, int, int, string); // name, email, algo, rsa-bits-index, nistp-index, passphrase
+    callback create-derived-key(string, string, string, int, string); // name, email, account index, algo, passphrase
 
     callback extend-expiry(string, string);       // days ("" = never), passphrase
     callback add-uid(string, string, string);     // name, email, passphrase

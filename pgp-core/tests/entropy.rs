@@ -285,6 +285,18 @@ fn derive_ed25519_is_the_only_deterministic_path() {
 /// packets rather than the public key packet, so changing them must NOT
 /// move this value.
 #[test]
+fn derive_p521_fingerprint_is_pinned() {
+    let key = pgp_core::derive_p521(&[0x11u8; 32], 0, "Test User", "test@example.com", None)
+        .expect("derive_p521 failed");
+    let info = pgp_core::key_info(&pgp_core::PgpKey::Secret(key));
+    assert_eq!(
+        info.fingerprint,
+        "1DDD40697E9294FDCDE044E7FBF7789F38366E5E",
+        "seed-derived P-521 identity changed — same rules as the Ed25519 pin above"
+    );
+}
+
+#[test]
 fn derive_ed25519_fingerprint_is_pinned() {
     assert_eq!(
         fingerprint_of(&[0x11u8; 32], 0),
