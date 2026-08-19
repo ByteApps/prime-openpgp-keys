@@ -40,3 +40,10 @@ on-device the GPL is the only option that costs nothing. KeyOS's own API crates
 (`server`, `fs`, `crypto`, `security`, ...) are GPL-3.0-or-later as well. Taking
 this app closed-source would require a paid Slint license *and* a resolution of
 the KeyOS side.
+
+## Artwork
+
+| Asset | Origin | License |
+|---|---|---|
+| `ui/icons/*.svg` | Adapted from [Lucide](https://lucide.dev) | ISC |
+| `resources/icon.svg`, `resources/icon-dark.svg` | Original ByteApps artwork | Same as the app |

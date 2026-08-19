@@ -39,6 +39,48 @@ component IconBtn inherits Rectangle {
     }
 }
 
+// Passphrase input with a show/hide eye toggle. The SDK Input draws the eye
+// through its suffix-icon slot (which reserves text space but takes no taps);
+// a TouchArea over the right-edge strip takes the tap. The wrapper forwards
+// the Input's layout constraints and lets it fill — a fixed-height wrapper
+// shifted every modal's controls off the UI suite's calibrated tap points.
+// The tap strip assumes the suffix slot is the RIGHTMOST thing in the field,
+// which holds only while PassInput never sets `clearable` (the SDK puts the
+// clear X to the suffix icon's right).
+component PassInput inherits Rectangle {
+    in property <string> label;
+    in property <string> placeholder;
+    in-out property <string> value;
+    property <bool> reveal: false;
+
+    preferred-height: field.preferred-height;
+    min-height: field.min-height;
+    max-height: field.max-height;
+
+    field := Input {
+        width: parent.width;
+        height: parent.height;
+        label: root.label;
+        placeholder: root.placeholder;
+        input-type: root.reveal ? InputType.text : InputType.password;
+        suffix-icon: root.reveal
+            ? @image-url("icons/eye-off.svg")
+            : @image-url("icons/eye.svg");
+        value <=> root.value;
+        submitted => {
+            field.clear-focus();
+        }
+    }
+    TouchArea {
+        width: 56px;
+        height: parent.height;
+        x: parent.width - self.width;
+        clicked => {
+            root.reveal = !root.reveal;
+        }
+    }
+}
+
 // One key in the keychain list.
 component KeyEntry inherits Rectangle {
     in property <KeyRow> entry;
@@ -617,14 +659,10 @@ component CreateView inherits VerticalLayout {
             create-email-input.clear-focus();
         }
     }
-    create-pass-input := Input {
+    create-pass-input := PassInput {
         label: "Passphrase (optional)";
         placeholder: "Passphrase";
-        input-type: InputType.password;
         value <=> Ui.create-pass;
-        submitted => {
-            create-pass-input.clear-focus();
-        }
     }
 
     Text {
@@ -784,14 +822,10 @@ export component AppWindow inherits Window {
                     expiry-days-input.clear-focus();
                 }
             }
-            expiry-pass-input := Input {
+            expiry-pass-input := PassInput {
                 label: "Passphrase";
                 placeholder: "Passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-pass;
-                submitted => {
-                    expiry-pass-input.clear-focus();
-                }
             }
             HorizontalLayout {
                 spacing: 12px;
@@ -840,14 +874,10 @@ export component AppWindow inherits Window {
                     uid-email-input.clear-focus();
                 }
             }
-            uid-pass-input := Input {
+            uid-pass-input := PassInput {
                 label: "Passphrase";
                 placeholder: "Passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-pass;
-                submitted => {
-                    uid-pass-input.clear-focus();
-                }
             }
             HorizontalLayout {
                 spacing: 12px;
@@ -887,14 +917,10 @@ export component AppWindow inherits Window {
                 font-size: 15px;
                 wrap: word-wrap;
             }
-            remove-pass-input := Input {
+            remove-pass-input := PassInput {
                 label: "Passphrase";
                 placeholder: "Passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-pass;
-                submitted => {
-                    remove-pass-input.clear-focus();
-                }
             }
             HorizontalLayout {
                 spacing: 12px;
@@ -935,14 +961,10 @@ export component AppWindow inherits Window {
                 font-size: 15px;
                 wrap: word-wrap;
             }
-            sign-pass-input := Input {
+            sign-pass-input := PassInput {
                 label: "Passphrase";
                 placeholder: "Passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-pass;
-                submitted => {
-                    sign-pass-input.clear-focus();
-                }
             }
             HorizontalLayout {
                 spacing: 12px;
@@ -982,14 +1004,10 @@ export component AppWindow inherits Window {
                 font-size: 15px;
                 wrap: word-wrap;
             }
-            sign-qr-pass-input := Input {
+            sign-qr-pass-input := PassInput {
                 label: "Passphrase";
                 placeholder: "Passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-pass;
-                submitted => {
-                    sign-qr-pass-input.clear-focus();
-                }
             }
             HorizontalLayout {
                 spacing: 12px;
@@ -1033,14 +1051,10 @@ export component AppWindow inherits Window {
                 label: "Also sign (needs passphrase)";
                 checked <=> Ui.encrypt-sign;
             }
-            if Ui.encrypt-sign: encrypt-pass-input := Input {
+            if Ui.encrypt-sign: encrypt-pass-input := PassInput {
                 label: "Passphrase";
                 placeholder: "Passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-pass;
-                submitted => {
-                    encrypt-pass-input.clear-focus();
-                }
             }
             HorizontalLayout {
                 spacing: 12px;
@@ -1080,14 +1094,10 @@ export component AppWindow inherits Window {
                 font-size: 15px;
                 wrap: word-wrap;
             }
-            decrypt-pass-input := Input {
+            decrypt-pass-input := PassInput {
                 label: "Passphrase";
                 placeholder: "Passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-pass;
-                submitted => {
-                    decrypt-pass-input.clear-focus();
-                }
             }
             HorizontalLayout {
                 spacing: 12px;
@@ -1120,23 +1130,15 @@ export component AppWindow inherits Window {
                 Ui.show-change-pass = false;
             }
 
-            old-pass-input := Input {
+            old-pass-input := PassInput {
                 label: "Current passphrase";
                 placeholder: "Current passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-a;
-                submitted => {
-                    old-pass-input.clear-focus();
-                }
             }
-            new-pass-input := Input {
+            new-pass-input := PassInput {
                 label: "New passphrase (empty = remove)";
                 placeholder: "New passphrase";
-                input-type: InputType.password;
                 value <=> Ui.field-b;
-                submitted => {
-                    new-pass-input.clear-focus();
-                }
             }
             HorizontalLayout {
                 spacing: 12px;
