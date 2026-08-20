@@ -448,12 +448,13 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 u.set_create_name("".into());
                 u.set_create_email("".into());
                 u.set_create_pass("".into());
-                u.set_create_algo(2); // default to the strongest algorithm (P-521)
-                u.set_create_rsa_bits_index(2);
+                u.set_create_algo(1); // default to Ed25519 — modern & fast
+                u.set_create_rsa_bits_index(2); // within a family, strongest first
                 u.set_create_nistp_index(2);
-                u.set_create_seed_algo(1);
+                u.set_create_seed_algo(0); // seed mode defaults to Ed25519 too
                 u.set_create_mode(0);
                 u.set_create_account("0".into());
+                u.set_create_expiry_index(3); // default: 2 years
                 show_info(&ui, "");
                 u.set_screen(3);
             }
@@ -511,6 +512,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             }
 
             let u = ui.global::<Ui>();
+            let expiry_days = expiry_days_for_index(u.get_create_expiry_index());
             u.set_busy_text(format!("Generating {algo_label} key…").into());
             u.set_busy(true);
 
@@ -530,6 +532,14 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     _ => pgp_core::generate_rsa(bits, name.trim(), email.trim(), passphrase),
                 }
                 .map_err(|e| e.0)
+                    // Expiration is stamped into the self-signatures after
+                    // generation, reusing the proven Expiry machinery. It is
+                    // not key material and never changes the fingerprint.
+                    .and_then(|key| match expiry_days {
+                        Some(_) => pgp_core::set_expiration(&key, pass.as_str(), expiry_days, now_epoch())
+                            .map_err(|e| e.0),
+                        None => Ok(key),
+                    })
                     .and_then(|key| {
                         let key = PgpKey::Secret(key);
                         save_key(&fs, &key).map(|f| (f, key))
@@ -538,7 +548,11 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 match result {
                     Ok((filename, key)) => {
                         let info = pgp_core::key_info(&key);
-                        log::info!("cb: create-key {algo_log} ok fpr={}", info.fingerprint);
+                        log::info!(
+                            "cb: create-key {algo_log} ok fpr={} expires={}",
+                            info.fingerprint,
+                            expiry_log(expiry_days)
+                        );
                         refresh_keys();
                         open_key(filename);
                         show_info(&ui, "Key generated");
@@ -578,6 +592,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             // 0 = Ed25519 (the original scheme), 1 = P-521 (domain-separated).
             let algo_log = if algo == 1 { "p521-derived" } else { "ed25519-derived" };
             let u = ui.global::<Ui>();
+            let expiry_days = expiry_days_for_index(u.get_create_expiry_index());
             u.set_busy_text(format!("Deriving key #{index} from device seed…").into());
             u.set_busy(true);
 
@@ -599,6 +614,15 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                         }
                         .map_err(|e| e.0)
                     })
+                    // Expiration lives in the self-signature, not the key
+                    // packet: the fingerprint (and re-derivation) is
+                    // unaffected, and a re-derived key can be re-stamped
+                    // with any expiry.
+                    .and_then(|key| match expiry_days {
+                        Some(_) => pgp_core::set_expiration(&key, pass.as_str(), expiry_days, now_epoch())
+                            .map_err(|e| e.0),
+                        None => Ok(key),
+                    })
                     .and_then(|key| {
                         let key = PgpKey::Secret(key);
                         save_key(&fs, &key).map(|f| (f, key))
@@ -607,7 +631,11 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 match result {
                     Ok((filename, key)) => {
                         let info = pgp_core::key_info(&key);
-                        log::info!("cb: create-key {algo_log} idx={index} ok fpr={}", info.fingerprint);
+                        log::info!(
+                            "cb: create-key {algo_log} idx={index} ok fpr={} expires={}",
+                            info.fingerprint,
+                            expiry_log(expiry_days)
+                        );
                         refresh_keys();
                         open_key(filename);
                         show_info(&ui, &format!("Key #{index} derived from device seed"));
@@ -1276,6 +1304,28 @@ fn read_bytes(fs: &Fs, path: &str, loc: Location) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).map_err(|_| "Read failed".to_string())?;
     Ok(buf)
+}
+
+/// Map the create form's Expires row to days-from-now. Index order matches
+/// the UI: 3m 6m 1y 2y 5y 10y Never.
+fn expiry_days_for_index(i: i32) -> Option<u32> {
+    match i {
+        0 => Some(91),
+        1 => Some(182),
+        2 => Some(365),
+        3 => Some(730),
+        4 => Some(1826),
+        5 => Some(3652),
+        _ => None,
+    }
+}
+
+/// "730d" / "never" for the create-key log contract.
+fn expiry_log(days: Option<u32>) -> String {
+    match days {
+        Some(d) => format!("{d}d"),
+        None => "never".to_string(),
+    }
 }
 
 fn now_epoch() -> i64 {
