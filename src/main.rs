@@ -536,7 +536,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     // generation, reusing the proven Expiry machinery. It is
                     // not key material and never changes the fingerprint.
                     .and_then(|key| match expiry_days {
-                        Some(_) => pgp_core::set_expiration(&key, pass.as_str(), expiry_days, now_epoch())
+                        Some(_) => pgp_core::set_expiration(key, pass.as_str(), expiry_days, now_epoch())
                             .map_err(|e| e.0),
                         None => Ok(key),
                     })
@@ -619,7 +619,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     // unaffected, and a re-derived key can be re-stamped
                     // with any expiry.
                     .and_then(|key| match expiry_days {
-                        Some(_) => pgp_core::set_expiration(&key, pass.as_str(), expiry_days, now_epoch())
+                        Some(_) => pgp_core::set_expiration(key, pass.as_str(), expiry_days, now_epoch())
                             .map_err(|e| e.0),
                         None => Ok(key),
                     })
@@ -669,7 +669,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     }
                 }
             };
-            let result = with_secret_key(&state, |sk| {
+            let result = with_secret_key_owned(&fs, &state, |sk| {
                 pgp_core::set_expiration(sk, pass.as_str(), days, now_epoch())
             })
             .and_then(|new_key| persist_current(&fs, &state, new_key));
@@ -701,7 +701,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 show_error(&ui, "Name and email are required".to_string());
                 return;
             }
-            let result = with_secret_key(&state, |sk| {
+            let result = with_secret_key_owned(&fs, &state, |sk| {
                 pgp_core::add_user_id(sk, pass.as_str(), name.trim(), email.trim())
             })
             .and_then(|new_key| persist_current(&fs, &state, new_key));
@@ -725,10 +725,10 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let ui_weak = ui_weak.clone();
         callbacks.on_remove_uid(move |index, pass| {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let result = with_secret_key(&state, |sk| {
+            let result = with_secret_key_owned(&fs, &state, |sk| {
                 // The packet edit itself needs no signing, but require the
                 // passphrase so a casual passerby can't strip identities.
-                pgp_core::check_passphrase(sk, pass.as_str())?;
+                pgp_core::check_passphrase(&sk, pass.as_str())?;
                 pgp_core::remove_user_id(sk, index as usize)
             })
             .and_then(|new_key| persist_current(&fs, &state, new_key));
@@ -754,7 +754,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let Some(ui) = ui_weak.upgrade() else { return };
             let new = new.to_string();
             let new_opt = if new.is_empty() { None } else { Some(new.as_str()) };
-            let result = with_secret_key(&state, |sk| {
+            let result = with_secret_key_owned(&fs, &state, |sk| {
                 pgp_core::change_passphrase(sk, old.as_str(), new_opt)
             })
             .and_then(|new_key| persist_current(&fs, &state, new_key));
@@ -1158,6 +1158,44 @@ fn strip_pgp_ext(path: &str) -> String {
 }
 
 /// Run an op against the current key, which must have secret material.
+/// Like [`with_secret_key`], but MOVES the open secret key into `op`.
+///
+/// Every editing operation consumes its key, because `SignedSecretKey::clone`
+/// compiles to a 177 KB stack frame against KeyOS's 256 KB process stack —
+/// see the `pgp_core` module docs. So the key comes OUT of the state here
+/// instead of being cloned.
+///
+/// On failure the key is restored by re-reading the file, which is untouched:
+/// edits only reach disk through `save_key` after the operation succeeds.
+/// Without that, a wrong passphrase would empty the detail screen.
+fn with_secret_key_owned<R, F>(fs: &Fs, state: &Rc<RefCell<State>>, op: F) -> Result<R, String>
+where
+    F: FnOnce(pgp_core::SignedSecretKey) -> Result<R, pgp_core::PgpError>,
+{
+    let taken = state.borrow_mut().current.take();
+    let Some(cur) = taken else {
+        return Err("No key open".to_string());
+    };
+    let CurrentKey { filename, key, info } = cur;
+    let sk = match key {
+        PgpKey::Secret(sk) => sk,
+        public => {
+            state.borrow_mut().current = Some(CurrentKey { filename, key: public, info });
+            return Err("Cannot edit: no secret key".to_string());
+        }
+    };
+    match op(sk) {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            if let Ok(key) = load_key(fs, &filename) {
+                let info = pgp_core::key_info(&key);
+                state.borrow_mut().current = Some(CurrentKey { filename, key, info });
+            }
+            Err(e.0)
+        }
+    }
+}
+
 fn with_secret_key<R, F>(state: &Rc<RefCell<State>>, op: F) -> Result<R, String>
 where
     F: FnOnce(&pgp_core::SignedSecretKey) -> Result<R, pgp_core::PgpError>,

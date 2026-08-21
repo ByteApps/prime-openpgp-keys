@@ -78,12 +78,12 @@ fn derived_key_supports_edit_operations() {
     let key = derive_ed25519(&SEED_A, 3, "Edit", "edit@example.com", Some("pw")).unwrap();
     let now = 1_800_000_000i64;
 
-    let expired = set_expiration(&key, "pw", Some(365), now).unwrap();
+    let expired = set_expiration(key.clone(), "pw", Some(365), now).unwrap();
     // Expiration is relative to the FIXED creation time.
     let info = key_info(&PgpKey::Secret(expired.clone()));
     assert_eq!(info.expires_at, Some(now + 365 * 86_400));
 
-    let added = add_user_id(&expired, "pw", "Second", "second@example.com").unwrap();
+    let added = add_user_id(expired.clone(), "pw", "Second", "second@example.com").unwrap();
     assert_eq!(key_info(&PgpKey::Secret(added.clone())).user_ids.len(), 2);
 
     // Fingerprint is untouched by all edits.

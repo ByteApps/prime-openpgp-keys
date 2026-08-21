@@ -313,7 +313,7 @@ fn set_expiration_roundtrip_all_algorithms() {
         let sk = secret(&format!("{name}-secret.asc"));
         let now = now_epoch();
 
-        let expired = set_expiration(&sk, PASS, Some(365), now).unwrap();
+        let expired = set_expiration(sk.clone(), PASS, Some(365), now).unwrap();
         let armored = export_armored(&PgpKey::Secret(expired)).unwrap();
         let info = key_info(&parse_one_bytes(armored.as_bytes()));
         let want = now + 365 * 86_400;
@@ -327,7 +327,7 @@ fn set_expiration_roundtrip_all_algorithms() {
 
         // and clear it again
         let sk2 = secret(&format!("{name}-secret.asc"));
-        let cleared = set_expiration(&set_expiration(&sk2, PASS, Some(30), now).unwrap(), PASS, None, now)
+        let cleared = set_expiration(set_expiration(sk2.clone(), PASS, Some(30), now).unwrap(), PASS, None, now)
             .unwrap();
         let armored = export_armored(&PgpKey::Secret(cleared)).unwrap();
         assert_eq!(
@@ -341,7 +341,7 @@ fn set_expiration_roundtrip_all_algorithms() {
 #[test]
 fn set_expiration_wrong_passphrase() {
     let sk = secret("rsa2048-secret.asc");
-    let err = set_expiration(&sk, "wrong", Some(365), now_epoch()).unwrap_err();
+    let err = set_expiration(sk.clone(), "wrong", Some(365), now_epoch()).unwrap_err();
     assert_eq!(err.0, WRONG_PASSPHRASE);
 }
 
@@ -350,7 +350,7 @@ fn add_and_remove_user_id_all_algorithms() {
     for name in EDITABLE {
         let sk = secret(&format!("{name}-secret.asc"));
 
-        let added = add_user_id(&sk, PASS, "Second Identity", "second@example.com").unwrap();
+        let added = add_user_id(sk.clone(), PASS, "Second Identity", "second@example.com").unwrap();
         let armored = export_armored(&PgpKey::Secret(added.clone())).unwrap();
         let info = key_info(&parse_one_bytes(armored.as_bytes()));
         assert_eq!(info.user_ids.len(), 2, "{name}");
@@ -360,13 +360,13 @@ fn add_and_remove_user_id_all_algorithms() {
             "{name}"
         );
 
-        let removed = remove_user_id(&added, 1).unwrap();
+        let removed = remove_user_id(added.clone(), 1).unwrap();
         let armored = export_armored(&PgpKey::Secret(removed.clone())).unwrap();
         let info = key_info(&parse_one_bytes(armored.as_bytes()));
         assert_eq!(info.user_ids.len(), 1, "{name}");
 
         // never allowed to drop the last one
-        assert!(remove_user_id(&removed, 0).is_err(), "{name}");
+        assert!(remove_user_id(removed.clone(), 0).is_err(), "{name}");
     }
 }
 
@@ -374,8 +374,8 @@ fn add_and_remove_user_id_all_algorithms() {
 fn add_user_id_preserves_expiration() {
     let sk = secret("rsa2048-secret.asc");
     let now = now_epoch();
-    let expiring = set_expiration(&sk, PASS, Some(100), now).unwrap();
-    let added = add_user_id(&expiring, PASS, "Third", "third@example.com").unwrap();
+    let expiring = set_expiration(sk.clone(), PASS, Some(100), now).unwrap();
+    let added = add_user_id(expiring.clone(), PASS, "Third", "third@example.com").unwrap();
     let armored = export_armored(&PgpKey::Secret(added)).unwrap();
     let info = key_info(&parse_one_bytes(armored.as_bytes()));
     let got = info.expires_at.expect("expiration must survive add_user_id");
@@ -387,7 +387,7 @@ fn change_passphrase_all_algorithms() {
     for name in EDITABLE {
         let sk = secret(&format!("{name}-secret.asc"));
 
-        let changed = change_passphrase(&sk, PASS, Some("brand-new-pass")).unwrap();
+        let changed = change_passphrase(sk.clone(), PASS, Some("brand-new-pass")).unwrap();
         let armored = export_armored(&PgpKey::Secret(changed)).unwrap();
         let reparsed = match parse_one_bytes(armored.as_bytes()) {
             PgpKey::Secret(sk) => sk,
@@ -401,7 +401,7 @@ fn change_passphrase_all_algorithms() {
         );
 
         // removing protection entirely
-        let unprotected = change_passphrase(&reparsed, "brand-new-pass", None).unwrap();
+        let unprotected = change_passphrase(reparsed.clone(), "brand-new-pass", None).unwrap();
         let armored = export_armored(&PgpKey::Secret(unprotected)).unwrap();
         let reparsed = match parse_one_bytes(armored.as_bytes()) {
             PgpKey::Secret(sk) => sk,
@@ -414,7 +414,7 @@ fn change_passphrase_all_algorithms() {
 #[test]
 fn change_passphrase_wrong_old() {
     let sk = secret("rsa2048-secret.asc");
-    let err = change_passphrase(&sk, "wrong", Some("x")).unwrap_err();
+    let err = change_passphrase(sk.clone(), "wrong", Some("x")).unwrap_err();
     assert_eq!(err.0, WRONG_PASSPHRASE);
 }
 

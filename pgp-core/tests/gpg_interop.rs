@@ -166,7 +166,7 @@ fn gpg_sees_extended_expiration() {
 
     let sk = fixture_secret("rsa2048-secret.asc");
     let now = now_epoch();
-    let edited = set_expiration(&sk, PASS, Some(365), now).unwrap();
+    let edited = set_expiration(sk.clone(), PASS, Some(365), now).unwrap();
     let info = key_info(&PgpKey::Secret(edited.clone()));
 
     gpg.import(&export_armored(&PgpKey::Secret(edited)).unwrap());
@@ -186,7 +186,7 @@ fn gpg_sees_added_user_id() {
     let Some(gpg) = Gpg::new() else { return };
 
     let sk = fixture_secret("rsa2048-secret.asc");
-    let edited = add_user_id(&sk, PASS, "Interop Uid", "interop-uid@example.com").unwrap();
+    let edited = add_user_id(sk.clone(), PASS, "Interop Uid", "interop-uid@example.com").unwrap();
     let info = key_info(&PgpKey::Secret(edited.clone()));
 
     gpg.import(&export_armored(&PgpKey::Secret(edited)).unwrap());
@@ -212,7 +212,7 @@ fn gpg_signs_after_our_passphrase_change() {
     let Some(gpg) = Gpg::new() else { return };
 
     let sk = fixture_secret("rsa2048-secret.asc");
-    let changed = change_passphrase(&sk, PASS, Some("rotated-pass")).unwrap();
+    let changed = change_passphrase(sk.clone(), PASS, Some("rotated-pass")).unwrap();
     let info = key_info(&PgpKey::Secret(changed.clone()));
 
     gpg.import(&export_armored(&PgpKey::Secret(changed)).unwrap());
@@ -239,7 +239,7 @@ fn our_edited_armor_is_packet_clean() {
 
     let sk = fixture_secret("rsa2048-secret.asc");
     let edited = add_user_id(
-        &set_expiration(&sk, PASS, Some(30), now_epoch()).unwrap(),
+        set_expiration(sk.clone(), PASS, Some(30), now_epoch()).unwrap(),
         PASS,
         "Packet Clean",
         "packets@example.com",

@@ -7,6 +7,29 @@
 //! All armor parsing runs behind `catch_unwind`: rpgp has a history of panics
 //! on crafted packets (CVE-2026-21895) and imported `.asc` files are
 //! untrusted input.
+//!
+//! # Editing takes the key BY VALUE — never clone a key on device
+//!
+//! `SignedSecretKey::clone` compiles to a **177 KB stack frame** on
+//! `armv7a-unknown-xous-elf`, and it calls `PublicParams::clone` (**145 KB**).
+//! KeyOS gives a process a **256 KB** stack (`STACK_PAGE_COUNT = 64` x 4 KB),
+//! so a single `key.clone()` inside an editing operation overflows it:
+//! 177 + 145 = 322 KB. The device reports
+//! `Invalid memory access (L2) ... 0x109b8 bytes below stack` and the app
+//! dies with exit code 255.
+//!
+//! The frames are that large because the derived `Clone` for `PublicParams`
+//! materialises every `draft-pqc` variant (ML-DSA-87, SLH-DSA, ML-KEM-1024)
+//! in one frame, each arm getting its own stack slot. The enum itself is only
+//! 304 bytes — `size_of` tells you nothing here; measure the ARM frame with
+//! `scripts/check-stack-frames.sh`.
+//!
+//! So `set_expiration`, `add_user_id`, `remove_user_id` and
+//! `change_passphrase` all take `key: SignedSecretKey` **by value** and mutate
+//! it in place. Do not "simplify" any of them back to `&SignedSecretKey` +
+//! `key.clone()`, and do not add a `.clone()` on a key type anywhere the app
+//! can reach: **the simulator cannot catch this** (a macOS thread has an 8 MB
+//! stack, so every one of these paths passes there).
 
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -174,11 +197,10 @@ pub fn export_armored(key: &PgpKey) -> Result<String, PgpError> {
 
 /// Armored public key, stripping secret material if present.
 pub fn export_public_armored(key: &PgpKey) -> Result<String, PgpError> {
-    let pk = match key {
-        PgpKey::Public(pk) => pk.clone(),
-        PgpKey::Secret(sk) => sk.to_public_key(),
-    };
-    Ok(pk.to_armored_string(ArmorOptions::default())?)
+    match key {
+        PgpKey::Public(pk) => Ok(pk.to_armored_string(ArmorOptions::default())?),
+        PgpKey::Secret(sk) => Ok(sk.to_public_key().to_armored_string(ArmorOptions::default())?),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -781,12 +803,13 @@ pub fn check_passphrase(key: &SignedSecretKey, pass: &str) -> Result<(), PgpErro
 /// Re-encrypt all secret key material under a new passphrase.
 /// `new = None` leaves the key unprotected.
 pub fn change_passphrase(
-    key: &SignedSecretKey,
+    key: SignedSecretKey,
     old: &str,
     new: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
     let old_pw = to_password(old);
-    let mut k = key.clone();
+    // Takes the key BY VALUE: see the "Editing takes the key by value" note.
+    let mut k = key;
     let mut rng = thread_rng();
 
     k.primary_key.remove_password(&old_pw).map_err(wrong_pw)?;
@@ -1045,13 +1068,13 @@ fn resign_user_id(
 /// Replace every user ID's self-certification, setting the key expiration.
 /// `days_from_now = None` clears the expiration ("never expires").
 pub fn set_expiration(
-    key: &SignedSecretKey,
+    key: SignedSecretKey,
     pass: &str,
     days_from_now: Option<u32>,
     now_epoch: i64,
 ) -> Result<SignedSecretKey, PgpError> {
     let pw = to_password(pass);
-    check_passphrase(key, pass)?;
+    check_passphrase(&key, pass)?;
 
     let created = key.primary_key.created_at().as_secs() as i64;
     let expiry_secs_from_creation = match days_from_now {
@@ -1073,16 +1096,23 @@ pub fn set_expiration(
     let key_id = key.primary_key.legacy_key_id();
     let template = latest_self_cert(&key.details.users, &fpr, &key_id).cloned();
 
-    let mut k = key.clone();
-    for (i, user) in k.details.users.iter_mut().enumerate() {
-        let sig = resign_user_id(
-            key,
+    // Phase 1: build every replacement self-signature against a BORROW, so
+    // nothing needs a second copy of the key.
+    let mut fresh = Vec::with_capacity(key.details.users.len());
+    for (i, user) in key.details.users.iter().enumerate() {
+        fresh.push(resign_user_id(
+            &key,
             &pw,
             &user.id,
             template.as_ref(),
             expiry_secs_from_creation,
             i == 0,
-        )?;
+        )?);
+    }
+
+    // Phase 2: apply them in place, consuming the key we were handed.
+    let mut k = key;
+    for (user, sig) in k.details.users.iter_mut().zip(fresh) {
         // Keep third-party certifications, replace our self-signatures.
         user.signatures
             .retain(|s| !is_self_sig(s, &fpr, &key_id));
@@ -1095,13 +1125,13 @@ pub fn set_expiration(
 
 /// Add a user ID, self-certified with the key's current expiration/prefs.
 pub fn add_user_id(
-    key: &SignedSecretKey,
+    key: SignedSecretKey,
     pass: &str,
     name: &str,
     email: &str,
 ) -> Result<SignedSecretKey, PgpError> {
     let pw = to_password(pass);
-    check_passphrase(key, pass)?;
+    check_passphrase(&key, pass)?;
 
     let uid = UserId::from_str(Default::default(), format!("{name} <{email}>"))
         .map_err(|e| PgpError(format!("Invalid user ID: {e}")))?;
@@ -1114,7 +1144,7 @@ pub fn add_user_id(
     let expiry = template.as_ref().and_then(|t| t.key_expiration_time());
 
     let sig = resign_user_id(
-        key,
+        &key,
         &pw,
         &uid,
         template.as_ref(),
@@ -1122,21 +1152,21 @@ pub fn add_user_id(
         false,
     )?;
 
-    let mut k = key.clone();
+    let mut k = key;
     k.details.users.push(uid.into_signed(sig));
     k.verify_bindings()?;
     Ok(k)
 }
 
 /// Remove the user ID at `index`. Refuses to remove the last one.
-pub fn remove_user_id(key: &SignedSecretKey, index: usize) -> Result<SignedSecretKey, PgpError> {
+pub fn remove_user_id(key: SignedSecretKey, index: usize) -> Result<SignedSecretKey, PgpError> {
     if key.details.users.len() <= 1 {
         return Err(PgpError("Cannot remove the last user ID".into()));
     }
     if index >= key.details.users.len() {
         return Err(PgpError("No such user ID".into()));
     }
-    let mut k = key.clone();
+    let mut k = key;
     k.details.users.remove(index);
     k.verify_bindings()?;
     Ok(k)
