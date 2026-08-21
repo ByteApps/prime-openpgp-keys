@@ -749,16 +749,16 @@ component CreateView inherits VerticalLayout {
                 // One-glance strength/compatibility note for the selected algorithm.
                 if Ui.create-mode == 0: Text {
                     text: Ui.create-algo == 0
-                        ? "RSA — classic and universally supported. 2048 ≈ 112-bit, 3072 ≈ 128-bit, 4096 ≈ 140-bit strength; bigger is slower to generate."
+                        ? "RSA (v4 key) — classic and universally supported: GnuPG, Thunderbird, Proton, Sequoia, GitHub. 2048 ≈ 112-bit, 3072 ≈ 128-bit, 4096 ≈ 140-bit; bigger is slower to generate."
                         : Ui.create-algo == 1
-                        ? "Ed25519 + Curve25519 — modern & fast, the default: small keys, instant generation, about 128-bit strength, supported by current PGP software. The same pair From-seed keys use."
+                        ? "Ed25519 + Curve25519 (v4 key) — modern & fast, the default: small keys, instant generation, ~128-bit. Works with GnuPG 2.1+, Thunderbird, Proton, Sequoia, GitHub. The same pair From-seed keys use."
                         : Ui.create-algo == 2
                         ? (Ui.create-nistp-index == 0
-                            ? "NIST P-256 (secp256r1; ECDSA + ECDH) — about 128-bit strength. The most widely deployed NIST curve (GnuPG 2.1+)."
+                            ? "NIST P-256 (secp256r1; ECDSA + ECDH, v4 key) — about 128-bit strength. The most widely deployed NIST curve: GnuPG 2.1+, Thunderbird, Sequoia."
                             : Ui.create-nistp-index == 1
-                            ? "NIST P-384 (secp384r1; ECDSA + ECDH) — about 192-bit strength, the CNSA-suite curve (GnuPG 2.1+)."
-                            : "NIST P-521 (secp521r1; ECDSA + ECDH) — about 256-bit strength, the strongest classical option. Fast; needs ECC-aware PGP software (GnuPG 2.1+).")
-                        : "Experimental — post-quantum hybrid (RFC 9980): Ed25519 signing + ML-KEM-768+X25519 encryption, sealed against future quantum computers. Needs RFC 9980-aware software; older PGP warns.";
+                            ? "NIST P-384 (secp384r1; ECDSA + ECDH, v4 key) — about 192-bit strength, the CNSA-suite curve: GnuPG 2.1+, Thunderbird, Sequoia."
+                            : "NIST P-521 (secp521r1; ECDSA + ECDH, v4 key) — about 256-bit strength, the strongest classical option. Fast; needs ECC-aware PGP software (GnuPG 2.1+, Thunderbird, Sequoia).")
+                        : "Experimental — post-quantum hybrid (RFC 9980, algorithm 35 on a v4 key): Ed25519 signing + ML-KEM-768+X25519 encryption. The only post-quantum option v4 allows. Needs RFC 9980-aware software (Sequoia, OpenPGP.js 6); GnuPG and Thunderbird import the key but warn about the subkey.";
                     color: Theme.palette-muted;
                     font-family: "Montserrat";
                     font-size: 13px;
@@ -783,8 +783,8 @@ component CreateView inherits VerticalLayout {
                 // algorithm derives an independent key from the same account.
                 if Ui.create-mode == 1: Text {
                     text: (Ui.create-seed-algo == 1
-                        ? "NIST P-521 (secp521r1; ECDSA + ECDH) — about 256-bit strength, the strongest option. Needs ECC-aware PGP software (GnuPG 2.1+)."
-                        : "Ed25519 + Curve25519 — modern & fast, the default; about 128-bit strength, and this app's original derivation scheme.")
+                        ? "NIST P-521 (secp521r1; ECDSA + ECDH, v4 key) — about 256-bit strength, the strongest option. Needs ECC-aware PGP software (GnuPG 2.1+, Thunderbird, Sequoia)."
+                        : "Ed25519 + Curve25519 (v4 key) — modern & fast, the default; ~128-bit strength, and this app's original derivation scheme. Works with GnuPG 2.1+, Thunderbird, Proton, Sequoia, GitHub.")
                         + " The same account number re-creates the same key only with the same algorithm — remember both.";
                     color: Theme.palette-muted;
                     font-family: "Montserrat";
