@@ -668,10 +668,20 @@ fn cargo_metadata_json(target_triple: &str) -> String {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
 
     if target_triple == DEVICE_TARGET {
-        let sdk_root = std::env::var("FOUNDATION_SDK_ROOT").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            format!("{home}/.foundation/sdk/current")
-        });
+        // Only trust FOUNDATION_SDK_ROOT when it really is the SDK checkout
+        // (has a flake.nix). Running this test the documented way — `nix
+        // develop <sdk> --command cargo test` — puts us inside the SDK shell,
+        // which exports that variable pointing at the current PROJECT. Using
+        // it then shells into a flake-less directory and the guard fails with
+        // "is not part of a flake", which reads like a broken check rather
+        // than a bad path (2026-08-27).
+        let sdk_root = std::env::var("FOUNDATION_SDK_ROOT")
+            .ok()
+            .filter(|p| std::path::Path::new(p).join("flake.nix").exists())
+            .unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                format!("{home}/.foundation/sdk/current")
+            });
         let nix = nix_binary();
         let out = Command::new(&nix)
             .args(["develop", &sdk_root, "--command", "cargo", "metadata", "--format-version", "1", "--filter-platform", target_triple, "--manifest-path"])
