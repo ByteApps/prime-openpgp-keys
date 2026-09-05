@@ -905,7 +905,7 @@ component CreateView inherits VerticalLayout {
                 if Ui.create-mode == 1 && Ui.has-imported-root: Text {
                     text: (Ui.create-seed-algo == 1
                         ? "NIST P-521 (secp521r1; ECDSA + ECDH, v4 key) — about 256-bit strength, the strongest option. Needs ECC-aware PGP software (GnuPG 2.1+, Thunderbird, Sequoia)."
-                        : "Ed25519 + Curve25519 (v4 key) — modern & fast, the default; ~128-bit strength, and this app's original derivation scheme. Works with GnuPG 2.1+, Thunderbird, Proton, Sequoia, GitHub.")
+                        : "Ed25519 + Curve25519 (v4 key) — modern & fast, the default; ~128-bit strength. Works with GnuPG 2.1+, Thunderbird, Proton, Sequoia, GitHub.")
                         + " The same account number re-creates the same key only with the same algorithm — remember both.";
                     color: Theme.palette-muted;
                     font-family: "Montserrat";

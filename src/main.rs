@@ -97,12 +97,22 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let mut buf = Vec::new();
             if file.read_to_end(&mut buf).is_ok() {
                 match pgp_core::store::peek_meta(&buf) {
-                    Ok(meta) => set_root_ui(&ui, &meta, None),
+                    Ok(meta) => {
+                        // Suites key off this to decide whether a Forget
+                        // leg is needed before an import leg.
+                        log::info!(
+                            "boot: imported-seed root_id={} words={} pass={}",
+                            hex_upper(&meta.root_id),
+                            meta.words,
+                            meta.pass_used as u8
+                        );
+                        set_root_ui(&ui, &meta, None)
+                    }
                     Err(e) => log::warn!("stored imported-seed root unreadable: {e}"),
                 }
             }
         }
-        Err(fs::Error::FileNotFound) => {}
+        Err(fs::Error::FileNotFound) => log::info!("boot: no imported seed"),
         Err(e) => log::warn!("could not open {IMPORTED_KEY_PATH}: {e:?}"),
     }
 
@@ -1554,6 +1564,18 @@ fn set_detail(ui: &AppWindow, filename: &str, info: &KeyInfo) {
             value: if info.has_secret { "Yes" } else { "No" }.into(),
         },
     ];
+    // Self-described provenance (the derived@byteapps.com notation): which
+    // imported seed and account number re-create this key.
+    if let Some(p) = &info.provenance {
+        let alg = match p.alg {
+            pgp_core::DerivedAlg::Ed25519 => "Ed25519",
+            pgp_core::DerivedAlg::P521 => "P-521",
+        };
+        rows.push(DetailRow {
+            label: "Derived from".into(),
+            value: format!("Seed ID {} · account {} · {}", hex_upper(&p.root_id), p.index, alg).into(),
+        });
+    }
     for sub in &info.subkeys {
         rows.push(DetailRow {
             label: format!("Subkey ({})", sub.usage).into(),
