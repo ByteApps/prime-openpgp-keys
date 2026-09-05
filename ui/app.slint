@@ -53,6 +53,8 @@ component PassInput inherits Rectangle {
     in property <string> placeholder;
     in-out property <string> value;
     property <bool> reveal: false;
+    callback focused();
+    callback blurred();
 
     preferred-height: field.preferred-height;
     min-height: field.min-height;
@@ -70,6 +72,12 @@ component PassInput inherits Rectangle {
         value <=> root.value;
         submitted => {
             field.clear-focus();
+        }
+        focused => {
+            root.focused();
+        }
+        blurred => {
+            root.blurred();
         }
     }
     TouchArea {
@@ -644,9 +652,30 @@ component CreateView inherits VerticalLayout {
 
     // The form outgrows the 800px screen (the Algorithm hint pushed the
     // Generate button past the bottom in Random mode), so it scrolls.
-    Flickable {
+    // Keyboard avoidance (2026-09-05, measured on device captures): the
+    // on-screen keyboard covers the bottom ~310px, and this Flickable only
+    // overflows the screen by a few px, so nothing could scroll a focused
+    // field out from under it. While any field has focus the Flickable
+    // shrinks to the space above the keyboard (the text editor's pattern)
+    // and `reveal` scrolls the focused block to its top. On blur it grows
+    // back and the viewport re-clamps.
+    property <bool> kb-up: false;
+    create-flick := Flickable {
         vertical-stretch: 1;
+        // A constant, deliberately: `self.y`/`root.height` are layout-derived
+        // and reading them here recursed at runtime ("Recursion detected",
+        // crashed on device 2026-09-05). The screen is a fixed 480x800; the
+        // keyboard's top edge sits at y≈495 and this Flickable starts at
+        // y≈130, so ~360px is what stays visible while typing.
+        max-height: root.kb-up ? 360px : 10000px;
         viewport-height: create-form.preferred-height;
+        changed height => {
+            self.viewport-y = min(0px, max(self.height - self.viewport-height, self.viewport-y));
+        }
+        // `y` is the block's position in create-form (viewport) coordinates.
+        public function reveal(y: length) {
+            self.viewport-y = min(0px, max(self.height - self.viewport-height, -(y - 8px)));
+        }
 
         create-form := VerticalLayout {
             alignment: start;
@@ -795,9 +824,12 @@ component CreateView inherits VerticalLayout {
                         wrap: word-wrap;
                     }
 
-                    if Ui.import-suggestions.length > 0: HorizontalLayout {
-                        height: 40px;
+                    // Always laid out (empty when there is nothing to
+                    // suggest) so the field never jumps under the caret.
+                    suggest-row := HorizontalLayout {
+                        height: 32px;
                         spacing: 8px;
+                        alignment: start;
                         for word in Ui.import-suggestions: Rectangle {
                             height: 32px;
                             width: chip-text.preferred-width + 24px;
@@ -836,12 +868,26 @@ component CreateView inherits VerticalLayout {
                         changed(text) => {
                             Callbacks.import-mnemonic-edited(text);
                         }
+                        focused => {
+                            root.kb-up = true;
+                            create-flick.reveal(import-seed-section.y + suggest-row.y);
+                        }
+                        blurred => {
+                            root.kb-up = false;
+                        }
                     }
 
                     import-pass-input := PassInput {
                         label: "Seed passphrase (BIP-39, optional)";
                         placeholder: "Passphrase";
                         value <=> Ui.import-passphrase;
+                        focused => {
+                            root.kb-up = true;
+                            create-flick.reveal(import-seed-section.y + self.y);
+                        }
+                        blurred => {
+                            root.kb-up = false;
+                        }
                     }
 
                     Button {
@@ -922,6 +968,13 @@ component CreateView inherits VerticalLayout {
                     value <=> Ui.create-account;
                     submitted => {
                         create-account-input.clear-focus();
+                    }
+                    focused => {
+                        root.kb-up = true;
+                        create-flick.reveal(self.y);
+                    }
+                    blurred => {
+                        root.kb-up = false;
                     }
                 }
                 // The date has to be a fixed constant: the OpenPGP fingerprint commits to
