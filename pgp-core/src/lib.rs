@@ -45,14 +45,16 @@ pub mod store;
 
 use hkdf::Hkdf;
 use pgp::composed::{
-    ArmorOptions, DetachedSignature, EncryptionCaps, KeyType, Message, MessageBuilder,
-    PublicOrSecret, SecretKeyParamsBuilder, SignedKeyDetails, SignedSecretSubKey,
-    SubkeyParamsBuilder,
+    ArmorOptions, DetachedSignature, KeyType, Message, MessageBuilder, PublicOrSecret,
+    SignedKeyDetails, SignedSecretSubKey,
 };
 use pgp::crypto::ecc_curve::ECCCurve;
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
-use pgp::crypto::{ecdh, ecdsa, ed25519, eddsa_legacy};
+// `pgp::crypto::rsa` is deliberately referenced by full path (`pgp::crypto::rsa::SecretKey`)
+// rather than `use`d here: the RustCrypto `rsa` crate (imported below for
+// `PublicKeyParts`) already owns the bare name `rsa` in this module.
+use pgp::crypto::{ecdh, ecdsa, ed25519, eddsa_legacy, ml_kem768_x25519};
 use pgp::packet::{
     Features, KeyFlags, Notation, PacketTrait, PubKeyInner, PublicKey, PublicSubkey, SecretKey,
     SecretSubkey, Signature, SignatureConfig, SignatureType, Subpacket, SubpacketData, UserId,
@@ -561,41 +563,43 @@ pub fn provenance(key: &PgpKey) -> Option<Provenance> {
 // ---------------------------------------------------------------------------
 
 /// Generate an RSA sign+certify primary key with an RSA encryption subkey.
+///
+/// Builds raw key material directly with rpgp's per-algorithm generator
+/// (`pgp::crypto::rsa::SecretKey::generate`) and hands it to [`assemble_key`]
+/// instead of `SecretKeyParamsBuilder`/`SecretKeyParams::generate()` — see the
+/// module doc comment on the device stack budget: the builder's `generate()`
+/// is one giant `match` over every rpgp key type (including the v6-only
+/// `draft-pqc` signature algorithms this app never uses), and LLVM inlines
+/// enough of it into a single frame to overflow KeyOS's 256 KB process stack.
+/// Every key this crate creates now goes through the same shallow assembly
+/// path as the seed-derived keys below.
 pub fn generate_rsa(
     bits: u32,
     name: &str,
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let mut subkey = SubkeyParamsBuilder::default();
-    subkey
-        .key_type(KeyType::Rsa(bits))
-        .can_encrypt(EncryptionCaps::All);
-    if let Some(pw) = passphrase {
-        subkey.passphrase(Some(pw.to_string()));
-    }
-    let subkey = subkey
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let primary_secret = pgp::crypto::rsa::SecretKey::generate(thread_rng(), bits as usize)?;
+    let primary_public_params = PublicParams::RSA((&primary_secret).into());
+    let primary_secret_params = PlainSecretParams::RSA(primary_secret);
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::Rsa(bits))
-        .can_certify(true)
-        .can_sign(true)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    if let Some(pw) = passphrase {
-        params.passphrase(Some(pw.to_string()));
-    }
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+    let sub_secret = pgp::crypto::rsa::SecretKey::generate(thread_rng(), bits as usize)?;
+    let sub_public_params = PublicParams::RSA((&sub_secret).into());
+    let sub_secret_params = PlainSecretParams::RSA(sub_secret);
 
-    let key = params.generate(thread_rng())?;
-    key.verify_bindings()?;
-    Ok(key)
+    let key = assemble_key(
+        KeyType::Rsa(bits).to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::Rsa(bits).to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::now(),
+        None,
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
 /// NIST prime curve for [`generate_nistp`], strongest last.
@@ -641,35 +645,27 @@ pub fn generate_nistp(
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let mut subkey = SubkeyParamsBuilder::default();
-    subkey
-        .key_type(KeyType::ECDH(curve.ecc()))
-        .can_encrypt(EncryptionCaps::All);
-    if let Some(pw) = passphrase {
-        subkey.passphrase(Some(pw.to_string()));
-    }
-    let subkey = subkey
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let primary_secret = ecdsa::SecretKey::generate(thread_rng(), &curve.ecc())?;
+    let primary_public_params = PublicParams::ECDSA((&primary_secret).try_into()?);
+    let primary_secret_params = PlainSecretParams::ECDSA(primary_secret);
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::ECDSA(curve.ecc()))
-        .can_certify(true)
-        .can_sign(true)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    if let Some(pw) = passphrase {
-        params.passphrase(Some(pw.to_string()));
-    }
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+    let sub_secret = ecdh::SecretKey::generate(thread_rng(), &curve.ecc())?;
+    let sub_public_params = PublicParams::ECDH((&sub_secret).try_into()?);
+    let sub_secret_params = PlainSecretParams::ECDH(sub_secret);
 
-    let key = params.generate(thread_rng())?;
-    key.verify_bindings()?;
-    Ok(key)
+    let key = assemble_key(
+        KeyType::ECDSA(curve.ecc()).to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::ECDH(curve.ecc()).to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::now(),
+        None,
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
 /// Generate a random Ed25519 sign+certify primary key with a Cv25519
@@ -680,35 +676,28 @@ pub fn generate_ed25519(
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let mut subkey = SubkeyParamsBuilder::default();
-    subkey
-        .key_type(KeyType::ECDH(ECCCurve::Curve25519Legacy))
-        .can_encrypt(EncryptionCaps::All);
-    if let Some(pw) = passphrase {
-        subkey.passphrase(Some(pw.to_string()));
-    }
-    let subkey = subkey
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let primary_secret = ed25519::SecretKey::generate(thread_rng(), ed25519::Mode::EdDSALegacy);
+    let primary_public_params = PublicParams::EdDSALegacy((&primary_secret).into());
+    let primary_secret_params =
+        PlainSecretParams::EdDSALegacy(eddsa_legacy::SecretKey::Ed25519(primary_secret));
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::Ed25519Legacy)
-        .can_certify(true)
-        .can_sign(true)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    if let Some(pw) = passphrase {
-        params.passphrase(Some(pw.to_string()));
-    }
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+    let sub_secret = ecdh::SecretKey::generate(thread_rng(), &ECCCurve::Curve25519Legacy)?;
+    let sub_public_params = PublicParams::ECDH((&sub_secret).try_into()?);
+    let sub_secret_params = PlainSecretParams::ECDH(sub_secret);
 
-    let key = params.generate(thread_rng())?;
-    key.verify_bindings()?;
-    Ok(key)
+    let key = assemble_key(
+        KeyType::Ed25519Legacy.to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::ECDH(ECCCurve::Curve25519Legacy).to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::now(),
+        None,
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
 /// Generate a post-quantum hybrid key: Ed25519 sign+certify primary with an
@@ -726,59 +715,33 @@ pub fn generate_pqc_hybrid(
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let mut subkey = SubkeyParamsBuilder::default();
-    subkey
-        .key_type(KeyType::MlKem768X25519)
-        .can_encrypt(EncryptionCaps::All);
-    if let Some(pw) = passphrase {
-        subkey.passphrase(Some(pw.to_string()));
-    }
-    let subkey = subkey
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let primary_secret = ed25519::SecretKey::generate(thread_rng(), ed25519::Mode::EdDSALegacy);
+    let primary_public_params = PublicParams::EdDSALegacy((&primary_secret).into());
+    let primary_secret_params =
+        PlainSecretParams::EdDSALegacy(eddsa_legacy::SecretKey::Ed25519(primary_secret));
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::Ed25519Legacy)
-        .can_certify(true)
-        .can_sign(true)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    if let Some(pw) = passphrase {
-        params.passphrase(Some(pw.to_string()));
-    }
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+    let sub_secret = ml_kem768_x25519::SecretKey::generate(thread_rng());
+    let sub_public_params = PublicParams::MlKem768X25519((&sub_secret).into());
+    let sub_secret_params = PlainSecretParams::MlKem768X25519(sub_secret);
 
-    let key = params.generate(thread_rng())?;
-    key.verify_bindings()?;
-    Ok(key)
-}
-
-/// Advertise the symmetric, hash and compression algorithms a sender should
-/// use when working with keys this crate creates.
-///
-/// Not cosmetic: RFC 4880 §13.2 makes TripleDES the fallback a sender must
-/// assume when a recipient advertises no symmetric preference, so a key
-/// without these invites a 64-bit block cipher instead of AES-256. The lists
-/// are ordered strongest-first and mirror what GnuPG advertises, so the
-/// negotiated algorithm is the same one either side would have picked.
-///
-/// These land in the user ID's self-signature, not the public key packet —
-/// they do not affect fingerprints (pinned by
-/// `derive_ed25519_fingerprint_is_pinned`).
-fn advertise_algorithm_preferences(params: &mut SecretKeyParamsBuilder) {
-    params
-        .preferred_symmetric_algorithms(preferred_symmetric_algorithms().into())
-        .preferred_hash_algorithms(preferred_hash_algorithms().into())
-        .preferred_compression_algorithms(preferred_compression_algorithms().into());
+    let key = assemble_key(
+        KeyType::Ed25519Legacy.to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::MlKem768X25519.to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::now(),
+        None,
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
 /// Strongest-first symmetric algorithm preference list — shared by
-/// [`advertise_algorithm_preferences`] (random keys) and the seed-derived
-/// self-signature builders below, so both paths advertise the same thing.
+/// [`sign_primary_self_cert`] (every key this crate creates, random or
+/// derived) so all paths advertise the same thing.
 fn preferred_symmetric_algorithms() -> Vec<SymmetricKeyAlgorithm> {
     vec![
         SymmetricKeyAlgorithm::AES256,
@@ -978,16 +941,17 @@ fn p521_secret_key(raw: [u8; 80]) -> Result<p521::SecretKey, PgpError> {
 /// Self-certify the primary user ID: certify+sign key flags, the algorithm
 /// preferences every key this crate makes advertises, a fixed creation time
 /// so re-deriving the same root+index reproduces this signature byte for
-/// byte (ECDSA/EdDSA signing here is otherwise deterministic already), and
-/// the `derived@byteapps.com` provenance notation (PLAN-openpgp-keys-import.md
-/// §6) recording the root/index/algorithm that produced this key.
+/// byte (ECDSA/EdDSA signing here is otherwise deterministic already), and —
+/// for a derived key only — the `derived@byteapps.com` provenance notation
+/// (PLAN-openpgp-keys-import.md §6) recording the root/index/algorithm that
+/// produced it. `provenance` is `None` for the random-keygen paths
+/// (`generate_rsa` etc.): no notation on those, so [`provenance`] (the query
+/// function) correctly reports `None` for them.
 fn sign_primary_self_cert(
     primary: &SecretKey,
     uid: &UserId,
     created: Timestamp,
-    root_id: &[u8; 4],
-    index: u32,
-    alg: DerivedAlg,
+    provenance: Option<(&[u8; 4], u32, DerivedAlg)>,
 ) -> Result<Signature, PgpError> {
     let mut rng = thread_rng();
     let mut config = SignatureConfig::from_key(&mut rng, primary, SignatureType::CertPositive)?;
@@ -998,7 +962,7 @@ fn sign_primary_self_cert(
     let mut features = Features::default();
     features.set_seipd_v1(true);
 
-    config.hashed_subpackets = vec![
+    let mut hashed_subpackets = vec![
         Subpacket::regular(SubpacketData::SignatureCreationTime(created))?,
         Subpacket::regular(SubpacketData::IssuerFingerprint(primary.fingerprint()))?,
         Subpacket::regular(SubpacketData::KeyFlags(keyflags))?,
@@ -1013,8 +977,11 @@ fn sign_primary_self_cert(
             preferred_compression_algorithms().into(),
         ))?,
         Subpacket::regular(SubpacketData::IsPrimary(true))?,
-        provenance_notation_subpacket(root_id, index, alg)?,
     ];
+    if let Some((root_id, index, alg)) = provenance {
+        hashed_subpackets.push(provenance_notation_subpacket(root_id, index, alg)?);
+    }
+    config.hashed_subpackets = hashed_subpackets;
     config.unhashed_subpackets = vec![Subpacket::regular(SubpacketData::IssuerKeyId(
         primary.legacy_key_id(),
     ))?];
@@ -1052,18 +1019,23 @@ fn sign_subkey_binding(
 
 /// Assemble a v4 primary + encryption subkey into a self-signed
 /// [`SignedSecretKey`], given already-constructed public/secret params for
-/// each. Shared tail of `derive_ed25519`/`derive_p521`: everything past "what
-/// are the raw key bytes" — packet framing, self-signature, subkey binding —
-/// is identical between the two algorithms.
+/// each. The ONE assembly path for every key this crate creates — random
+/// (`generate_rsa`/`generate_nistp`/`generate_ed25519`/`generate_pqc_hybrid`)
+/// and seed-derived (`derive_ed25519`/`derive_p521`) alike — so packet
+/// framing, self-signature and subkey binding are identical between them;
+/// only the raw key bytes, the creation time, and whether a provenance
+/// notation applies differ per caller.
 ///
 /// Builds packets directly with rpgp's public packet-assembly API instead of
-/// `SecretKeyParams::generate()`, which only knows how to consume an RNG.
-/// Never clones `sub_pub_key`/`PublicParams`-carrying values: the subkey
-/// binding signature is computed from a borrow *before* the public subkey is
-/// moved into the secret subkey packet (see the module doc comment on the
-/// device stack budget).
+/// `SecretKeyParamsBuilder`/`SecretKeyParams::generate()`, which only knows
+/// how to consume an RNG through one giant per-algorithm `match` (see the
+/// module doc comment on the device stack budget — that `match`, with the
+/// `draft-pqc` arms inlined, is what overflowed KeyOS's 256 KB process stack
+/// on the random-keygen paths). Never clones `sub_pub_key`/`PublicParams`-
+/// carrying values: the subkey binding signature is computed from a borrow
+/// *before* the public subkey is moved into the secret subkey packet.
 #[allow(clippy::too_many_arguments)]
-fn assemble_derived_key(
+fn assemble_key(
     primary_alg: pgp::crypto::public_key::PublicKeyAlgorithm,
     primary_public_params: PublicParams,
     primary_secret_params: PlainSecretParams,
@@ -1072,12 +1044,9 @@ fn assemble_derived_key(
     sub_secret_params: PlainSecretParams,
     name: &str,
     email: &str,
-    root_id: &[u8; 4],
-    index: u32,
-    alg: DerivedAlg,
+    created: Timestamp,
+    provenance: Option<(&[u8; 4], u32, DerivedAlg)>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let created = Timestamp::from_secs(DERIVED_KEY_CREATED_AT);
-
     let primary_pub_inner =
         PubKeyInner::new(KeyVersion::V4, primary_alg, created, None, primary_public_params)?;
     let primary_pub_key = PublicKey::from_inner(primary_pub_inner)?;
@@ -1090,7 +1059,7 @@ fn assemble_derived_key(
     let uid = UserId::from_str(Default::default(), format!("{name} <{email}>"))
         .map_err(|e| PgpError(format!("Invalid user ID: {e}")))?;
 
-    let cert_sig = sign_primary_self_cert(&primary_sec_key, &uid, created, root_id, index, alg)?;
+    let cert_sig = sign_primary_self_cert(&primary_sec_key, &uid, created, provenance)?;
     let subkey_sig = sign_subkey_binding(&primary_sec_key, &sub_pub_key, created)?;
     let sub_sec_key = SecretSubkey::new(sub_pub_key, SecretParams::Plain(sub_secret_params))?;
 
@@ -1187,7 +1156,7 @@ pub fn derive_ed25519(
     let sub_public_params = PublicParams::ECDH((&ecdh_secret).try_into()?);
     let sub_secret_params = PlainSecretParams::ECDH(ecdh_secret);
 
-    let key = assemble_derived_key(
+    let key = assemble_key(
         KeyType::Ed25519Legacy.to_alg(),
         primary_public_params,
         primary_secret_params,
@@ -1196,9 +1165,8 @@ pub fn derive_ed25519(
         sub_secret_params,
         name,
         email,
-        root_id,
-        index,
-        DerivedAlg::Ed25519,
+        Timestamp::from_secs(DERIVED_KEY_CREATED_AT),
+        Some((root_id, index, DerivedAlg::Ed25519)),
     )?;
     apply_passphrase(key, passphrase)
 }
@@ -1244,7 +1212,7 @@ pub fn derive_p521(
     let sub_public_params = PublicParams::ECDH((&ecdh_secret).try_into()?);
     let sub_secret_params = PlainSecretParams::ECDH(ecdh_secret);
 
-    let key = assemble_derived_key(
+    let key = assemble_key(
         KeyType::ECDSA(ECCCurve::P521).to_alg(),
         primary_public_params,
         primary_secret_params,
@@ -1253,9 +1221,8 @@ pub fn derive_p521(
         sub_secret_params,
         name,
         email,
-        root_id,
-        index,
-        DerivedAlg::P521,
+        Timestamp::from_secs(DERIVED_KEY_CREATED_AT),
+        Some((root_id, index, DerivedAlg::P521)),
     )?;
     apply_passphrase(key, passphrase)
 }
