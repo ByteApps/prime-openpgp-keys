@@ -4993,14 +4993,17 @@ dependencies = [
 name = "pgp-core"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "getrandom 0.2.10",
  "hkdf",
+ "num-bigint",
+ "p521",
  "pgp",
  "rand 0.8.6",
- "rand_chacha 0.3.1",
  "rsa",
  "serde_json",
  "sha2",
+ "x25519-dalek",
 ]
 
 [[package]]
