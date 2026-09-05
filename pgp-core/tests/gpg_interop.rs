@@ -255,8 +255,15 @@ fn our_edited_armor_is_packet_clean() {
 fn gpg_accepts_seed_derived_key() {
     let Some(gpg) = Gpg::new() else { return };
 
-    let key = derive_ed25519(&[0x42; 32], 0, "Derived Interop", "derived@example.com", Some("d-pass"))
-        .unwrap();
+    let key = derive_ed25519(
+        &[0x42; 32],
+        &[0xAA, 0xBB, 0xCC, 0xDD],
+        0,
+        "Derived Interop",
+        "derived@example.com",
+        Some("d-pass"),
+    )
+    .unwrap();
     let info = key_info(&PgpKey::Secret(key.clone()));
 
     gpg.import(&export_armored(&PgpKey::Secret(key)).unwrap());
@@ -551,8 +558,15 @@ fn gpg_accepts_our_random_ed25519_key() {
 fn gpg_accepts_seed_derived_p521_key() {
     let Some(gpg) = Gpg::new() else { return };
 
-    let key = derive_p521(&[0x42; 32], 0, "Derived P521", "derived-p521@example.com", Some("d-pass"))
-        .unwrap();
+    let key = derive_p521(
+        &[0x42; 32],
+        &[0xAA, 0xBB, 0xCC, 0xDD],
+        0,
+        "Derived P521",
+        "derived-p521@example.com",
+        Some("d-pass"),
+    )
+    .unwrap();
     let info = key_info(&PgpKey::Secret(key.clone()));
     gpg.import(&export_armored(&PgpKey::Secret(key)).unwrap());
 
@@ -623,4 +637,35 @@ fn gpg_encrypts_all_nist_curves_we_decrypt_and_back() {
         assert!(ok, "{name}: gpg -d of our message failed: {err}");
         assert_eq!(out_txt.as_bytes(), &plain[..], "{name}: gpg plaintext mismatch");
     }
+}
+
+/// PLAN-openpgp-keys-import.md §6: a derived key's primary self-cert carries
+/// a `derived@byteapps.com` notation, and it must be an ordinary OpenPGP
+/// notation any implementation — GnuPG included — can see via
+/// `--list-packets`, not something only `pgp_core::provenance` understands.
+#[test]
+fn gpg_list_packets_shows_provenance_notation() {
+    let Some(gpg) = Gpg::new() else { return };
+
+    let key = derive_ed25519(
+        &[0x77; 32],
+        &[0xDE, 0xAD, 0xBE, 0xEF],
+        12,
+        "Notation Interop",
+        "notation@example.com",
+        None,
+    )
+    .unwrap();
+    let armored = export_armored(&PgpKey::Secret(key)).unwrap();
+
+    let (ok, out, err) = gpg.run(&["--list-packets"], armored.as_bytes());
+    assert!(ok, "gpg --list-packets failed: {err}");
+    assert!(
+        out.contains("derived@byteapps.com"),
+        "gpg --list-packets did not show the notation name:\n{out}"
+    );
+    assert!(
+        out.contains("v1;root=DEADBEEF;idx=12;alg=ed25519"),
+        "gpg --list-packets did not show the notation value:\n{out}"
+    );
 }

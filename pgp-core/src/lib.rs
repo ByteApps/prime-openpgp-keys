@@ -34,23 +34,39 @@
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// Imported-seed root derivation (PLAN-openpgp-keys-import.md §2):
+/// BIP-39 mnemonic + optional passphrase -> the portable, cross-platform
+/// root this app persists (sealed at rest — see `store`, U3).
+pub mod import;
+/// Sealing/opening the imported-seed root at rest (PLAN-openpgp-keys-import.md
+/// §4). Pure functions of the sealing seed — the app layer reads/writes the
+/// AppData file.
+pub mod store;
+
+use hkdf::Hkdf;
 use pgp::composed::{
-    ArmorOptions, DetachedSignature, EncryptionCaps, KeyType, Message, MessageBuilder,
-    PublicOrSecret, SecretKeyParamsBuilder, SubkeyParamsBuilder,
+    ArmorOptions, DetachedSignature, KeyType, Message, MessageBuilder, PublicOrSecret,
+    SignedKeyDetails, SignedSecretSubKey,
 };
 use pgp::crypto::ecc_curve::ECCCurve;
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
+// `pgp::crypto::rsa` is deliberately referenced by full path (`pgp::crypto::rsa::SecretKey`)
+// rather than `use`d here: the RustCrypto `rsa` crate (imported below for
+// `PublicKeyParts`) already owns the bare name `rsa` in this module.
+use pgp::crypto::{ecdh, ecdsa, ed25519, eddsa_legacy, ml_kem768_x25519};
 use pgp::packet::{
-    PacketTrait, Signature, SignatureConfig, SignatureType, Subpacket, SubpacketData, UserId,
+    Features, KeyFlags, Notation, PacketTrait, PubKeyInner, PublicKey, PublicSubkey, SecretKey,
+    SecretSubkey, Signature, SignatureConfig, SignatureType, Subpacket, SubpacketData, UserId,
 };
 use pgp::ser::Serialize as _;
 use pgp::types::{
     CompressionAlgorithm, Duration as PgpDuration, Fingerprint, KeyDetails as _, KeyVersion,
-    Password, PublicParams, SignedUser, SigningKey, Timestamp,
+    Password, PlainSecretParams, PublicParams, SecretParams, SignedUser, SigningKey, Timestamp,
 };
 use rand::thread_rng;
 use rsa::traits::PublicKeyParts;
+use sha2::Sha256;
 
 // Re-exported so the app crate doesn't need its own `pgp` dependency.
 pub use pgp::composed::{SignedPublicKey, SignedSecretKey};
@@ -115,6 +131,11 @@ pub struct KeyInfo {
     pub user_ids: Vec<String>,
     pub subkeys: Vec<SubkeyInfo>,
     pub has_secret: bool,
+    /// Parsed `derived@byteapps.com` notation from the latest primary
+    /// self-certification, if present (PLAN-openpgp-keys-import.md §6).
+    /// `None` for random keys, foreign keys, and keys with a malformed or
+    /// absent notation.
+    pub provenance: Option<Provenance>,
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +382,8 @@ pub fn key_info(key: &PgpKey) -> KeyInfo {
         }
     }
 
+    let provenance = latest_self_cert(users, &fpr, &key_id).and_then(provenance_from_cert);
+
     KeyInfo {
         fingerprint: format!("{fpr:X}"),
         key_id: format!("{key_id}").to_uppercase(),
@@ -371,7 +394,168 @@ pub fn key_info(key: &PgpKey) -> KeyInfo {
         user_ids,
         subkeys,
         has_secret: key.has_secret(),
+        provenance,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Provenance (PLAN-openpgp-keys-import.md §6)
+//
+// A derived key's primary self-certification carries a `derived@byteapps.com`
+// notation recording which imported-seed root and index produced it, so any
+// importer — including a future desktop/mobile app — can tell where a
+// derived key came from without guesswork. The notation lives in the HASHED
+// subpackets (it is bound by the signature) but is otherwise inert: it never
+// touches the public key packet, so it cannot move a fingerprint.
+// ---------------------------------------------------------------------------
+
+/// Notation name used to mark a derived key's primary self-certification.
+const PROVENANCE_NOTATION_NAME: &str = "derived@byteapps.com";
+
+/// Which HKDF stream (`ed25519/...` vs `p521/...`) produced a derived key —
+/// the `alg` field of the provenance notation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedAlg {
+    Ed25519,
+    P521,
+}
+
+impl DerivedAlg {
+    fn as_str(self) -> &'static str {
+        match self {
+            DerivedAlg::Ed25519 => "ed25519",
+            DerivedAlg::P521 => "p521",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ed25519" => Some(DerivedAlg::Ed25519),
+            "p521" => Some(DerivedAlg::P521),
+            _ => None,
+        }
+    }
+}
+
+/// Parsed `derived@byteapps.com` notation: which imported-seed root and
+/// index produced a derived key. See [`provenance`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Provenance {
+    /// Notation format version. Always `1` today — [`provenance`] returns
+    /// `None` for any other value rather than guessing at its shape.
+    pub version: u8,
+    pub root_id: [u8; 4],
+    pub index: u32,
+    pub alg: DerivedAlg,
+}
+
+/// Render the notation value string: `v1;root=<8 upper-hex>;idx=<index>;alg=<alg>`.
+fn provenance_notation_value(root_id: &[u8; 4], index: u32, alg: DerivedAlg) -> String {
+    format!(
+        "v1;root={:02X}{:02X}{:02X}{:02X};idx={index};alg={}",
+        root_id[0],
+        root_id[1],
+        root_id[2],
+        root_id[3],
+        alg.as_str()
+    )
+}
+
+/// Build the hashed `derived@byteapps.com` notation subpacket for a freshly
+/// derived key's primary self-certification.
+fn provenance_notation_subpacket(
+    root_id: &[u8; 4],
+    index: u32,
+    alg: DerivedAlg,
+) -> Result<Subpacket, PgpError> {
+    Ok(Subpacket::regular(SubpacketData::Notation(Notation {
+        readable: true,
+        name: PROVENANCE_NOTATION_NAME.into(),
+        value: provenance_notation_value(root_id, index, alg).into(),
+    }))?)
+}
+
+/// Parse a notation value string (`v1;root=...;idx=...;alg=...`) into a
+/// [`Provenance`]. Any deviation from the exact expected shape — wrong
+/// version, non-hex/wrong-length root, unparseable index, unknown algorithm,
+/// a missing or duplicated field, or extra junk — returns `None` rather than
+/// guessing. Never panics on untrusted input.
+fn parse_provenance_value(value: &str) -> Option<Provenance> {
+    let mut root_id: Option<[u8; 4]> = None;
+    let mut index: Option<u32> = None;
+    let mut alg: Option<DerivedAlg> = None;
+
+    let mut fields = value.split(';');
+    if fields.next()? != "v1" {
+        return None;
+    }
+    for field in fields {
+        let (key, val) = field.split_once('=')?;
+        match key {
+            "root" => {
+                if root_id.is_some() || val.len() != 8 {
+                    return None;
+                }
+                let mut bytes = [0u8; 4];
+                for (i, b) in bytes.iter_mut().enumerate() {
+                    *b = u8::from_str_radix(val.get(i * 2..i * 2 + 2)?, 16).ok()?;
+                }
+                root_id = Some(bytes);
+            }
+            "idx" => {
+                if index.is_some() {
+                    return None;
+                }
+                index = Some(val.parse().ok()?);
+            }
+            "alg" => {
+                if alg.is_some() {
+                    return None;
+                }
+                alg = Some(DerivedAlg::parse(val)?);
+            }
+            _ => return None,
+        }
+    }
+
+    Some(Provenance {
+        version: 1,
+        root_id: root_id?,
+        index: index?,
+        alg: alg?,
+    })
+}
+
+/// Extract and parse the `derived@byteapps.com` notation from one
+/// self-certification, if present and well-formed.
+fn provenance_from_cert(sig: &Signature) -> Option<Provenance> {
+    let notation = sig
+        .notations()
+        .into_iter()
+        .find(|n| n.name.as_ref() == PROVENANCE_NOTATION_NAME.as_bytes())?;
+    let value = std::str::from_utf8(notation.value.as_ref()).ok()?;
+    parse_provenance_value(value)
+}
+
+/// Which imported-seed root and index produced this key, if it was
+/// deterministically derived and its notation is intact. `None` for random
+/// keys ([`generate_ed25519`] etc.), foreign/imported keys, and any key
+/// whose notation value doesn't parse.
+pub fn provenance(key: &PgpKey) -> Option<Provenance> {
+    let (fpr, key_id, users) = match key {
+        PgpKey::Public(pk) => (
+            pk.primary_key.fingerprint(),
+            pk.primary_key.legacy_key_id(),
+            &pk.details.users,
+        ),
+        PgpKey::Secret(sk) => (
+            sk.primary_key.fingerprint(),
+            sk.primary_key.legacy_key_id(),
+            &sk.details.users,
+        ),
+    };
+    let sig = latest_self_cert(users, &fpr, &key_id)?;
+    provenance_from_cert(sig)
 }
 
 // ---------------------------------------------------------------------------
@@ -379,41 +563,43 @@ pub fn key_info(key: &PgpKey) -> KeyInfo {
 // ---------------------------------------------------------------------------
 
 /// Generate an RSA sign+certify primary key with an RSA encryption subkey.
+///
+/// Builds raw key material directly with rpgp's per-algorithm generator
+/// (`pgp::crypto::rsa::SecretKey::generate`) and hands it to [`assemble_key`]
+/// instead of `SecretKeyParamsBuilder`/`SecretKeyParams::generate()` — see the
+/// module doc comment on the device stack budget: the builder's `generate()`
+/// is one giant `match` over every rpgp key type (including the v6-only
+/// `draft-pqc` signature algorithms this app never uses), and LLVM inlines
+/// enough of it into a single frame to overflow KeyOS's 256 KB process stack.
+/// Every key this crate creates now goes through the same shallow assembly
+/// path as the seed-derived keys below.
 pub fn generate_rsa(
     bits: u32,
     name: &str,
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let mut subkey = SubkeyParamsBuilder::default();
-    subkey
-        .key_type(KeyType::Rsa(bits))
-        .can_encrypt(EncryptionCaps::All);
-    if let Some(pw) = passphrase {
-        subkey.passphrase(Some(pw.to_string()));
-    }
-    let subkey = subkey
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let primary_secret = pgp::crypto::rsa::SecretKey::generate(thread_rng(), bits as usize)?;
+    let primary_public_params = PublicParams::RSA((&primary_secret).into());
+    let primary_secret_params = PlainSecretParams::RSA(primary_secret);
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::Rsa(bits))
-        .can_certify(true)
-        .can_sign(true)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    if let Some(pw) = passphrase {
-        params.passphrase(Some(pw.to_string()));
-    }
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+    let sub_secret = pgp::crypto::rsa::SecretKey::generate(thread_rng(), bits as usize)?;
+    let sub_public_params = PublicParams::RSA((&sub_secret).into());
+    let sub_secret_params = PlainSecretParams::RSA(sub_secret);
 
-    let key = params.generate(thread_rng())?;
-    key.verify_bindings()?;
-    Ok(key)
+    let key = assemble_key(
+        KeyType::Rsa(bits).to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::Rsa(bits).to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::now(),
+        None,
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
 /// NIST prime curve for [`generate_nistp`], strongest last.
@@ -459,35 +645,27 @@ pub fn generate_nistp(
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let mut subkey = SubkeyParamsBuilder::default();
-    subkey
-        .key_type(KeyType::ECDH(curve.ecc()))
-        .can_encrypt(EncryptionCaps::All);
-    if let Some(pw) = passphrase {
-        subkey.passphrase(Some(pw.to_string()));
-    }
-    let subkey = subkey
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let primary_secret = ecdsa::SecretKey::generate(thread_rng(), &curve.ecc())?;
+    let primary_public_params = PublicParams::ECDSA((&primary_secret).try_into()?);
+    let primary_secret_params = PlainSecretParams::ECDSA(primary_secret);
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::ECDSA(curve.ecc()))
-        .can_certify(true)
-        .can_sign(true)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    if let Some(pw) = passphrase {
-        params.passphrase(Some(pw.to_string()));
-    }
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+    let sub_secret = ecdh::SecretKey::generate(thread_rng(), &curve.ecc())?;
+    let sub_public_params = PublicParams::ECDH((&sub_secret).try_into()?);
+    let sub_secret_params = PlainSecretParams::ECDH(sub_secret);
 
-    let key = params.generate(thread_rng())?;
-    key.verify_bindings()?;
-    Ok(key)
+    let key = assemble_key(
+        KeyType::ECDSA(curve.ecc()).to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::ECDH(curve.ecc()).to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::now(),
+        None,
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
 /// Generate a random Ed25519 sign+certify primary key with a Cv25519
@@ -498,35 +676,28 @@ pub fn generate_ed25519(
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let mut subkey = SubkeyParamsBuilder::default();
-    subkey
-        .key_type(KeyType::ECDH(ECCCurve::Curve25519Legacy))
-        .can_encrypt(EncryptionCaps::All);
-    if let Some(pw) = passphrase {
-        subkey.passphrase(Some(pw.to_string()));
-    }
-    let subkey = subkey
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let primary_secret = ed25519::SecretKey::generate(thread_rng(), ed25519::Mode::EdDSALegacy);
+    let primary_public_params = PublicParams::EdDSALegacy((&primary_secret).into());
+    let primary_secret_params =
+        PlainSecretParams::EdDSALegacy(eddsa_legacy::SecretKey::Ed25519(primary_secret));
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::Ed25519Legacy)
-        .can_certify(true)
-        .can_sign(true)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    if let Some(pw) = passphrase {
-        params.passphrase(Some(pw.to_string()));
-    }
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+    let sub_secret = ecdh::SecretKey::generate(thread_rng(), &ECCCurve::Curve25519Legacy)?;
+    let sub_public_params = PublicParams::ECDH((&sub_secret).try_into()?);
+    let sub_secret_params = PlainSecretParams::ECDH(sub_secret);
 
-    let key = params.generate(thread_rng())?;
-    key.verify_bindings()?;
-    Ok(key)
+    let key = assemble_key(
+        KeyType::Ed25519Legacy.to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::ECDH(ECCCurve::Curve25519Legacy).to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::now(),
+        None,
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
 /// Generate a post-quantum hybrid key: Ed25519 sign+certify primary with an
@@ -544,76 +715,56 @@ pub fn generate_pqc_hybrid(
     email: &str,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    let mut subkey = SubkeyParamsBuilder::default();
-    subkey
-        .key_type(KeyType::MlKem768X25519)
-        .can_encrypt(EncryptionCaps::All);
-    if let Some(pw) = passphrase {
-        subkey.passphrase(Some(pw.to_string()));
-    }
-    let subkey = subkey
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let primary_secret = ed25519::SecretKey::generate(thread_rng(), ed25519::Mode::EdDSALegacy);
+    let primary_public_params = PublicParams::EdDSALegacy((&primary_secret).into());
+    let primary_secret_params =
+        PlainSecretParams::EdDSALegacy(eddsa_legacy::SecretKey::Ed25519(primary_secret));
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::Ed25519Legacy)
-        .can_certify(true)
-        .can_sign(true)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    if let Some(pw) = passphrase {
-        params.passphrase(Some(pw.to_string()));
-    }
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
+    let sub_secret = ml_kem768_x25519::SecretKey::generate(thread_rng());
+    let sub_public_params = PublicParams::MlKem768X25519((&sub_secret).into());
+    let sub_secret_params = PlainSecretParams::MlKem768X25519(sub_secret);
 
-    let key = params.generate(thread_rng())?;
-    key.verify_bindings()?;
-    Ok(key)
+    let key = assemble_key(
+        KeyType::Ed25519Legacy.to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::MlKem768X25519.to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::now(),
+        None,
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
-/// Advertise the symmetric, hash and compression algorithms a sender should
-/// use when working with keys this crate creates.
-///
-/// Not cosmetic: RFC 4880 §13.2 makes TripleDES the fallback a sender must
-/// assume when a recipient advertises no symmetric preference, so a key
-/// without these invites a 64-bit block cipher instead of AES-256. The lists
-/// are ordered strongest-first and mirror what GnuPG advertises, so the
-/// negotiated algorithm is the same one either side would have picked.
-///
-/// These land in the user ID's self-signature, not the public key packet —
-/// they do not affect fingerprints (pinned by
-/// `derive_ed25519_fingerprint_is_pinned`).
-fn advertise_algorithm_preferences(params: &mut SecretKeyParamsBuilder) {
-    params
-        .preferred_symmetric_algorithms(
-            vec![
-                SymmetricKeyAlgorithm::AES256,
-                SymmetricKeyAlgorithm::AES192,
-                SymmetricKeyAlgorithm::AES128,
-            ]
-            .into(),
-        )
-        .preferred_hash_algorithms(
-            vec![
-                HashAlgorithm::Sha512,
-                HashAlgorithm::Sha384,
-                HashAlgorithm::Sha256,
-                HashAlgorithm::Sha224,
-            ]
-            .into(),
-        )
-        .preferred_compression_algorithms(
-            vec![
-                CompressionAlgorithm::ZLIB,
-                CompressionAlgorithm::ZIP,
-                CompressionAlgorithm::Uncompressed,
-            ]
-            .into(),
-        );
+/// Strongest-first symmetric algorithm preference list — shared by
+/// [`sign_primary_self_cert`] (every key this crate creates, random or
+/// derived) so all paths advertise the same thing.
+fn preferred_symmetric_algorithms() -> Vec<SymmetricKeyAlgorithm> {
+    vec![
+        SymmetricKeyAlgorithm::AES256,
+        SymmetricKeyAlgorithm::AES192,
+        SymmetricKeyAlgorithm::AES128,
+    ]
+}
+
+fn preferred_hash_algorithms() -> Vec<HashAlgorithm> {
+    vec![
+        HashAlgorithm::Sha512,
+        HashAlgorithm::Sha384,
+        HashAlgorithm::Sha256,
+        HashAlgorithm::Sha224,
+    ]
+}
+
+fn preferred_compression_algorithms() -> Vec<CompressionAlgorithm> {
+    vec![
+        CompressionAlgorithm::ZLIB,
+        CompressionAlgorithm::ZIP,
+        CompressionAlgorithm::Uncompressed,
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -625,143 +776,319 @@ fn advertise_algorithm_preferences(params: &mut SecretKeyParamsBuilder) {
 /// MUST NEVER CHANGE or re-derived keys stop matching their originals.
 pub const DERIVED_KEY_CREATED_AT: u32 = 1_231_006_505;
 
-/// Domain-separation salt for the HKDF expansion of the device app-seed.
+/// HKDF-SHA256 salt for the per-key expansion of the imported-seed root
+/// (PLAN-openpgp-keys-import.md §2.3). This is a **cross-platform contract**:
+/// a future desktop/mobile OpenPGP Keys app must derive byte-identical keys
+/// from the same root + index using this exact salt/info scheme, so the
+/// derivation is specified as raw key bytes rather than "whatever rpgp's
+/// RNG-driven generator does" (the old, rpgp-only scheme this replaced).
 /// Versioned; bump only alongside a new derivation scheme, never in place.
-/// The "prime-pgp-keychain" prefix is the app's original name and is FROZEN:
-/// the 2026-08-19 rename to prime-openpgp-keys deliberately left it unchanged,
-/// because every seed-derived key's fingerprint depends on it.
-const DERIVATION_SALT: &[u8] = b"prime-pgp-keychain/derive/v1";
+const KEY_DERIVATION_SALT: &[u8] = b"com.byteapps.openpgp-keys/key/v1";
 
-/// Deterministically derive an Ed25519 (sign+certify) key with a Cv25519
-/// encryption subkey from a 32-byte device app-seed and a key index.
+/// `HKDF-Extract(salt = KEY_DERIVATION_SALT, IKM = root)`, ready for the
+/// per-algorithm `HKDF-Expand` calls below.
+fn key_prk(root: &[u8; 32]) -> Hkdf<Sha256> {
+    Hkdf::<Sha256>::new(Some(KEY_DERIVATION_SALT), root)
+}
+
+/// `prefix || LE32(index) || suffix`, the HKDF `info` parameter shape shared
+/// by every per-key expansion in §2.3.
+fn hkdf_info(prefix: &[u8], index: u32, suffix: &[u8]) -> Vec<u8> {
+    let mut info = Vec::with_capacity(prefix.len() + 4 + suffix.len());
+    info.extend_from_slice(prefix);
+    info.extend_from_slice(&index.to_le_bytes());
+    info.extend_from_slice(suffix);
+    info
+}
+
+fn expand<const N: usize>(prk: &Hkdf<Sha256>, info: &[u8]) -> Result<[u8; N], PgpError> {
+    let mut out = [0u8; N];
+    prk.expand(info, &mut out)
+        .map_err(|e| PgpError(format!("Key derivation failed: {e}")))?;
+    Ok(out)
+}
+
+// -- RFC 7748 clamping for the X25519 subkey scalar --------------------------
+
+/// Clamp a raw 32-byte value into a valid X25519 scalar per RFC 7748 §5:
+/// clear the low 3 bits, clear the top bit, set the second-highest bit. This
+/// is the canonical private-scalar representation every X25519
+/// implementation produces from raw entropy (x25519-dalek itself clamps
+/// again, idempotently, whenever the scalar is actually used), so the
+/// derived subkey's *exported* secret bytes match what any other library
+/// would store for the same `enc_key` — not just its public point.
+fn clamp_x25519(mut k: [u8; 32]) -> [u8; 32] {
+    k[0] &= 0b1111_1000;
+    k[31] &= 0b0111_1111;
+    k[31] |= 0b0100_0000;
+    k
+}
+
+// -- Big-endian modular reduction for the P-521 scalar -----------------------
+//
+// No bignum crate: this is a single fixed-width (640-bit / 528-bit) binary
+// long division, easier to review and to cross-check byte-for-byte against
+// an independent implementation (tests/derive.rs does so with `num-bigint`)
+// than a generic-width dependency would be.
+
+/// NIST P-521 group order `n`, big-endian, 66 bytes (SEC 2 §2.6.2 / FIPS
+/// 186-4 D.1.2.5).
+const P521_ORDER: [u8; 66] = [
+    0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xfa, 0x51, 0x86, 0x87, 0x83, 0xbf, 0x2f, 0x96, 0x6b, 0x7f, 0xcc, 0x01, 0x48, 0xf7, 0x09,
+    0xa5, 0xd0, 0x3b, 0xb5, 0xc9, 0xb8, 0x89, 0x9c, 0x47, 0xae, 0xbb, 0x6f, 0xb7, 0x1e, 0x91, 0x38,
+    0x64, 0x09,
+];
+
+/// True if the big-endian byte string `a` is >= `b` (equal length).
+fn be_ge(a: &[u8], b: &[u8]) -> bool {
+    a.iter().cmp(b.iter()) != std::cmp::Ordering::Less
+}
+
+/// `a -= b` in place, both big-endian, equal length; caller guarantees
+/// `a >= b` (no underflow).
+fn be_sub_assign(a: &mut [u8], b: &[u8]) {
+    let mut borrow = 0i16;
+    for i in (0..a.len()).rev() {
+        let diff = i16::from(a[i]) - i16::from(b[i]) - borrow;
+        if diff < 0 {
+            a[i] = (diff + 256) as u8;
+            borrow = 1;
+        } else {
+            a[i] = diff as u8;
+            borrow = 0;
+        }
+    }
+}
+
+/// `a += 1` in place, big-endian; caller guarantees no overflow.
+fn be_add_one(a: &mut [u8]) {
+    for byte in a.iter_mut().rev() {
+        let (sum, carry) = byte.overflowing_add(1);
+        *byte = sum;
+        if !carry {
+            return;
+        }
+    }
+}
+
+/// `int_be(raw) mod int_be(modulus)`, both interpreted as big-endian
+/// integers of the same byte length. Binary long division, MSB-first: shifts
+/// one bit of `raw` into a running remainder and conditionally subtracts
+/// `modulus`. `raw` and `modulus` must be the same length; the result is
+/// that same length (small values keep their leading zero bytes).
+fn be_reduce(raw: &[u8], modulus: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(raw.len(), modulus.len());
+    let mut rem = vec![0u8; raw.len()];
+    for &byte in raw {
+        for bit in (0..8).rev() {
+            let mut carry = (byte >> bit) & 1;
+            for b in rem.iter_mut().rev() {
+                let next_carry = *b >> 7;
+                *b = (*b << 1) | carry;
+                carry = next_carry;
+            }
+            if be_ge(&rem, modulus) {
+                be_sub_assign(&mut rem, modulus);
+            }
+        }
+    }
+    rem
+}
+
+/// FIPS 186-4 B.4.1-style scalar derivation: 80 bytes of HKDF output
+/// (640 bits, 74 more than the 66-byte field size) reduced modulo `n - 1`
+/// and shifted into `[1, n-1]`, where `n` is the P-521 group order. The extra
+/// bits over the field size make the modulo bias on `[0, n-2]` negligible
+/// (below 2^-119).
+fn p521_scalar_from_raw(raw: &[u8; 80]) -> [u8; 66] {
+    let mut n_minus_1 = P521_ORDER;
+    let mut one = [0u8; 66];
+    one[65] = 1;
+    be_sub_assign(&mut n_minus_1, &one);
+
+    let mut modulus = [0u8; 80];
+    modulus[80 - 66..].copy_from_slice(&n_minus_1);
+
+    let rem = be_reduce(raw, &modulus);
+    let mut scalar = [0u8; 66];
+    scalar.copy_from_slice(&rem[80 - 66..]);
+    be_add_one(&mut scalar);
+    scalar
+}
+
+/// Build a validated P-521 secret scalar from 80 bytes of HKDF output. Never
+/// errors in practice (the reduction always lands in `[1, n-1]`); the
+/// `Result` exists because `p521::SecretKey::from_slice` returns one.
+fn p521_secret_key(raw: [u8; 80]) -> Result<p521::SecretKey, PgpError> {
+    let scalar = p521_scalar_from_raw(&raw);
+    p521::SecretKey::from_slice(&scalar)
+        .map_err(|e| PgpError(format!("Invalid P-521 scalar: {e}")))
+}
+
+// -- Self-signing helpers -----------------------------------------------------
+//
+// Deliberately NOT `composed::KeyDetails::sign`/`PublicSubkey::sign` (what
+// `SecretKeyParams::generate()` uses internally): those hardcode
+// `Timestamp::now()` for the self-signature's creation time, which would
+// make every re-derivation produce a different armored export even though
+// the fingerprint stayed the same. Pinning the self-signature's creation
+// time to `DERIVED_KEY_CREATED_AT` too makes the whole export byte-identical
+// across re-derivations (S2K passphrase salts aside) — same pattern the
+// existing `resign_user_id` below already uses for post-hoc re-signing.
+
+/// Self-certify the primary user ID: certify+sign key flags, the algorithm
+/// preferences every key this crate makes advertises, a fixed creation time
+/// so re-deriving the same root+index reproduces this signature byte for
+/// byte (ECDSA/EdDSA signing here is otherwise deterministic already), and —
+/// for a derived key only — the `derived@byteapps.com` provenance notation
+/// (PLAN-openpgp-keys-import.md §6) recording the root/index/algorithm that
+/// produced it. `provenance` is `None` for the random-keygen paths
+/// (`generate_rsa` etc.): no notation on those, so [`provenance`] (the query
+/// function) correctly reports `None` for them.
+fn sign_primary_self_cert(
+    primary: &SecretKey,
+    uid: &UserId,
+    created: Timestamp,
+    provenance: Option<(&[u8; 4], u32, DerivedAlg)>,
+) -> Result<Signature, PgpError> {
+    let mut rng = thread_rng();
+    let mut config = SignatureConfig::from_key(&mut rng, primary, SignatureType::CertPositive)?;
+
+    let mut keyflags = KeyFlags::default();
+    keyflags.set_certify(true);
+    keyflags.set_sign(true);
+    let mut features = Features::default();
+    features.set_seipd_v1(true);
+
+    let mut hashed_subpackets = vec![
+        Subpacket::regular(SubpacketData::SignatureCreationTime(created))?,
+        Subpacket::regular(SubpacketData::IssuerFingerprint(primary.fingerprint()))?,
+        Subpacket::regular(SubpacketData::KeyFlags(keyflags))?,
+        Subpacket::regular(SubpacketData::Features(features))?,
+        Subpacket::regular(SubpacketData::PreferredSymmetricAlgorithms(
+            preferred_symmetric_algorithms().into(),
+        ))?,
+        Subpacket::regular(SubpacketData::PreferredHashAlgorithms(
+            preferred_hash_algorithms().into(),
+        ))?,
+        Subpacket::regular(SubpacketData::PreferredCompressionAlgorithms(
+            preferred_compression_algorithms().into(),
+        ))?,
+        Subpacket::regular(SubpacketData::IsPrimary(true))?,
+    ];
+    if let Some((root_id, index, alg)) = provenance {
+        hashed_subpackets.push(provenance_notation_subpacket(root_id, index, alg)?);
+    }
+    config.hashed_subpackets = hashed_subpackets;
+    config.unhashed_subpackets = vec![Subpacket::regular(SubpacketData::IssuerKeyId(
+        primary.legacy_key_id(),
+    ))?];
+
+    let pw = Password::empty();
+    Ok(config.sign_certification(primary, primary.public_key(), &pw, uid.tag(), uid)?)
+}
+
+/// Bind the encryption subkey to the primary with a Subkey Binding Signature
+/// (type 0x18), again at the fixed creation time.
+fn sign_subkey_binding(
+    primary: &SecretKey,
+    sub_pub: &PublicSubkey,
+    created: Timestamp,
+) -> Result<Signature, PgpError> {
+    let mut rng = thread_rng();
+    let mut config = SignatureConfig::from_key(&mut rng, primary, SignatureType::SubkeyBinding)?;
+
+    let mut keyflags = KeyFlags::default();
+    keyflags.set_encrypt_comms(true);
+    keyflags.set_encrypt_storage(true);
+
+    config.hashed_subpackets = vec![
+        Subpacket::regular(SubpacketData::SignatureCreationTime(created))?,
+        Subpacket::regular(SubpacketData::IssuerFingerprint(primary.fingerprint()))?,
+        Subpacket::regular(SubpacketData::KeyFlags(keyflags))?,
+    ];
+    config.unhashed_subpackets = vec![Subpacket::regular(SubpacketData::IssuerKeyId(
+        primary.legacy_key_id(),
+    ))?];
+
+    let pw = Password::empty();
+    Ok(config.sign_subkey_binding(primary, primary.public_key(), &pw, sub_pub)?)
+}
+
+/// Assemble a v4 primary + encryption subkey into a self-signed
+/// [`SignedSecretKey`], given already-constructed public/secret params for
+/// each. The ONE assembly path for every key this crate creates — random
+/// (`generate_rsa`/`generate_nistp`/`generate_ed25519`/`generate_pqc_hybrid`)
+/// and seed-derived (`derive_ed25519`/`derive_p521`) alike — so packet
+/// framing, self-signature and subkey binding are identical between them;
+/// only the raw key bytes, the creation time, and whether a provenance
+/// notation applies differ per caller.
 ///
-/// Same seed + same index => byte-identical key material and fingerprint,
-/// regardless of user ID or passphrase (the key is generated unprotected
-/// from the deterministic stream; the passphrase is applied afterwards with
-/// the system RNG so S2K salts never consume derivation bytes).
-pub fn derive_ed25519(
-    app_seed: &[u8; 32],
-    index: u32,
+/// Builds packets directly with rpgp's public packet-assembly API instead of
+/// `SecretKeyParamsBuilder`/`SecretKeyParams::generate()`, which only knows
+/// how to consume an RNG through one giant per-algorithm `match` (see the
+/// module doc comment on the device stack budget — that `match`, with the
+/// `draft-pqc` arms inlined, is what overflowed KeyOS's 256 KB process stack
+/// on the random-keygen paths). Never clones `sub_pub_key`/`PublicParams`-
+/// carrying values: the subkey binding signature is computed from a borrow
+/// *before* the public subkey is moved into the secret subkey packet.
+#[allow(clippy::too_many_arguments)]
+fn assemble_key(
+    primary_alg: pgp::crypto::public_key::PublicKeyAlgorithm,
+    primary_public_params: PublicParams,
+    primary_secret_params: PlainSecretParams,
+    sub_alg: pgp::crypto::public_key::PublicKeyAlgorithm,
+    sub_public_params: PublicParams,
+    sub_secret_params: PlainSecretParams,
     name: &str,
     email: &str,
-    passphrase: Option<&str>,
+    created: Timestamp,
+    provenance: Option<(&[u8; 4], u32, DerivedAlg)>,
 ) -> Result<SignedSecretKey, PgpError> {
-    use hkdf::Hkdf;
-    use rand_chacha::rand_core::SeedableRng;
-    use sha2::Sha256;
+    let primary_pub_inner =
+        PubKeyInner::new(KeyVersion::V4, primary_alg, created, None, primary_public_params)?;
+    let primary_pub_key = PublicKey::from_inner(primary_pub_inner)?;
+    let primary_sec_key = SecretKey::new(primary_pub_key, SecretParams::Plain(primary_secret_params))?;
 
-    let hk = Hkdf::<Sha256>::new(Some(DERIVATION_SALT), app_seed);
-    let mut key_seed = [0u8; 32];
-    let mut info = Vec::with_capacity(12);
-    info.extend_from_slice(b"pgp-key/");
-    info.extend_from_slice(&index.to_le_bytes());
-    hk.expand(&info, &mut key_seed)
-        .map_err(|e| PgpError(format!("Key derivation failed: {e}")))?;
-    let mut rng = rand_chacha::ChaCha20Rng::from_seed(key_seed);
+    let sub_pub_inner =
+        PubKeyInner::new(KeyVersion::V4, sub_alg, created, None, sub_public_params)?;
+    let sub_pub_key = PublicSubkey::from_inner(sub_pub_inner)?;
 
-    let created = Timestamp::from_secs(DERIVED_KEY_CREATED_AT);
+    let uid = UserId::from_str(Default::default(), format!("{name} <{email}>"))
+        .map_err(|e| PgpError(format!("Invalid user ID: {e}")))?;
 
-    let subkey = SubkeyParamsBuilder::default()
-        .key_type(KeyType::ECDH(ECCCurve::Curve25519Legacy))
-        .can_encrypt(EncryptionCaps::All)
-        .created_at(created)
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
+    let cert_sig = sign_primary_self_cert(&primary_sec_key, &uid, created, provenance)?;
+    let subkey_sig = sign_subkey_binding(&primary_sec_key, &sub_pub_key, created)?;
+    let sub_sec_key = SecretSubkey::new(sub_pub_key, SecretParams::Plain(sub_secret_params))?;
 
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::Ed25519Legacy)
-        .can_certify(true)
-        .can_sign(true)
-        .created_at(created)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
-
-    let key = params.generate(&mut rng)?;
-
-    // Passphrase protection is applied outside the deterministic stream.
-    let key = match passphrase {
-        Some(pw) if !pw.is_empty() => {
-            let mut sys_rng = thread_rng();
-            let pw = Password::from(pw);
-            let mut k = key;
-            k.primary_key.set_password(&mut sys_rng, &pw)?;
-            for sub in &mut k.secret_subkeys {
-                sub.key.set_password(&mut sys_rng, &pw)?;
-            }
-            k
-        }
-        _ => key,
+    let key = SignedSecretKey {
+        primary_key: primary_sec_key,
+        details: SignedKeyDetails {
+            revocation_signatures: Vec::new(),
+            direct_signatures: Vec::new(),
+            users: vec![uid.into_signed(cert_sig)],
+            user_attributes: Vec::new(),
+        },
+        public_subkeys: Vec::new(),
+        secret_subkeys: vec![SignedSecretSubKey {
+            key: sub_sec_key,
+            signatures: vec![subkey_sig],
+        }],
     };
-
     key.verify_bindings()?;
     Ok(key)
 }
 
-/// Deterministically derive a NIST P-521 (ECDSA sign+certify) key with a
-/// P-521 ECDH encryption subkey from the device app-seed and a key index.
-///
-/// A deliberate SIBLING of [`derive_ed25519`], not a refactor of it: that
-/// function's byte behaviour is FROZEN (fingerprints depend on it), so this
-/// one duplicates the shape with its own HKDF info prefix. The
-/// `pgp-key-p521/` prefix domain-separates the two streams — the same
-/// account number yields independent Ed25519 and P-521 keys, and existing
-/// Ed25519 derivations are untouched. Same salt, same fixed creation time,
-/// same "passphrase applied outside the deterministic stream" rule.
-///
-/// Reproducibility rests on rpgp `=0.20.0` consuming the seeded stream
-/// identically forever (same contract as derive_ed25519); the pinned-
-/// fingerprint tests in tests/entropy.rs gate any rpgp bump.
-pub fn derive_p521(
-    app_seed: &[u8; 32],
-    index: u32,
-    name: &str,
-    email: &str,
+/// Apply S2K passphrase protection outside the deterministic derivation —
+/// with the system RNG, exactly as the random-keygen paths do, so S2K salts
+/// never consume derivation bytes and never affect the fingerprint.
+fn apply_passphrase(
+    key: SignedSecretKey,
     passphrase: Option<&str>,
 ) -> Result<SignedSecretKey, PgpError> {
-    use hkdf::Hkdf;
-    use rand_chacha::rand_core::SeedableRng;
-    use sha2::Sha256;
-
-    let hk = Hkdf::<Sha256>::new(Some(DERIVATION_SALT), app_seed);
-    let mut key_seed = [0u8; 32];
-    let mut info = Vec::with_capacity(17);
-    info.extend_from_slice(b"pgp-key-p521/");
-    info.extend_from_slice(&index.to_le_bytes());
-    hk.expand(&info, &mut key_seed)
-        .map_err(|e| PgpError(format!("Key derivation failed: {e}")))?;
-    let mut rng = rand_chacha::ChaCha20Rng::from_seed(key_seed);
-
-    let created = Timestamp::from_secs(DERIVED_KEY_CREATED_AT);
-
-    let subkey = SubkeyParamsBuilder::default()
-        .key_type(KeyType::ECDH(ECCCurve::P521))
-        .can_encrypt(EncryptionCaps::All)
-        .created_at(created)
-        .build()
-        .map_err(|e| PgpError(format!("Invalid subkey parameters: {e}")))?;
-
-    let mut params = SecretKeyParamsBuilder::default();
-    params
-        .key_type(KeyType::ECDSA(ECCCurve::P521))
-        .can_certify(true)
-        .can_sign(true)
-        .created_at(created)
-        .primary_user_id(format!("{name} <{email}>"))
-        .subkeys(vec![subkey]);
-    advertise_algorithm_preferences(&mut params);
-    let params = params
-        .build()
-        .map_err(|e| PgpError(format!("Invalid key parameters: {e}")))?;
-
-    let key = params.generate(&mut rng)?;
-
-    // Passphrase protection is applied outside the deterministic stream.
-    let key = match passphrase {
+    match passphrase {
         Some(pw) if !pw.is_empty() => {
             let mut sys_rng = thread_rng();
             let pw = Password::from(pw);
@@ -770,13 +1097,134 @@ pub fn derive_p521(
             for sub in &mut k.secret_subkeys {
                 sub.key.set_password(&mut sys_rng, &pw)?;
             }
-            k
+            Ok(k)
         }
-        _ => key,
-    };
+        _ => Ok(key),
+    }
+}
 
-    key.verify_bindings()?;
-    Ok(key)
+/// Deterministically derive an Ed25519 (sign+certify) key with a Cv25519
+/// encryption subkey from a 32-byte imported-seed root and a key index.
+///
+/// Cross-platform contract (PLAN-openpgp-keys-import.md §2.3): the key
+/// material is specified as raw bytes — an RFC 8032 Ed25519 seed and an
+/// RFC 7748 X25519 scalar — not as "whatever rpgp's RNG-driven generator
+/// does with a seeded stream" (the old scheme this replaced, reproducible
+/// only by rpgp 0.20). Any OpenPGP library can reproduce this key from the
+/// same `root` + `index`.
+///
+/// Same root + same index => byte-identical key material and fingerprint,
+/// regardless of user ID or passphrase: the passphrase is applied after
+/// construction with the system RNG so S2K salts never consume derivation
+/// bytes, and the self-signatures use the fixed creation time too, so two
+/// derivations of the same root+index produce byte-identical armor apart
+/// from the S2K salt when a passphrase is set.
+pub fn derive_ed25519(
+    root: &[u8; 32],
+    root_id: &[u8; 4],
+    index: u32,
+    name: &str,
+    email: &str,
+    passphrase: Option<&str>,
+) -> Result<SignedSecretKey, PgpError> {
+    let prk = key_prk(root);
+    let sign_seed: [u8; 32] = expand(&prk, &hkdf_info(b"ed25519/", index, b"/sign"))?;
+    let enc_key: [u8; 32] = expand(&prk, &hkdf_info(b"ed25519/", index, b"/encrypt"))?;
+
+    // Primary: EdDSALegacy (alg 22), curve Ed25519. The RFC 8032 secret seed
+    // is used directly — no clamping, ed25519-dalek hashes it internally.
+    let ed_secret = ed25519::SecretKey::try_from_bytes(sign_seed, ed25519::Mode::EdDSALegacy)?;
+    let primary_public_params = PublicParams::EdDSALegacy((&ed_secret).into());
+    let primary_secret_params =
+        PlainSecretParams::EdDSALegacy(eddsa_legacy::SecretKey::Ed25519(ed_secret));
+
+    // Subkey: ECDH (alg 18), curve Curve25519 (legacy). `enc_key` is the
+    // scalar in RFC 7748 native (little-endian) byte order, clamped per
+    // RFC 7748. `Curve25519Legacy::try_from_bytes_rev` expects the legacy
+    // MPI (reversed/big-endian) wire order and reverses it back to native
+    // before storing — so we hand it the reverse of our clamped native
+    // bytes, and the value it stores is exactly `clamp(enc_key)`.
+    let clamped = clamp_x25519(enc_key);
+    let mut wire = clamped;
+    wire.reverse();
+    let cv = ecdh::Curve25519Legacy::try_from_bytes_rev(&wire)?;
+    let ecdh_secret = ecdh::SecretKey::Curve25519Legacy(cv);
+    // KDF params (SHA-256 / AES-128) come from `ECCCurve::Curve25519Legacy`'s
+    // own `hash_algo()`/`sym_algo()` via this conversion — the same values
+    // rpgp's own generator would pick (pinned by
+    // `derive_ed25519_ecdh_kdf_params_are_sha256_aes128` in tests/derive.rs).
+    let sub_public_params = PublicParams::ECDH((&ecdh_secret).try_into()?);
+    let sub_secret_params = PlainSecretParams::ECDH(ecdh_secret);
+
+    let key = assemble_key(
+        KeyType::Ed25519Legacy.to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::ECDH(ECCCurve::Curve25519Legacy).to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::from_secs(DERIVED_KEY_CREATED_AT),
+        Some((root_id, index, DerivedAlg::Ed25519)),
+    )?;
+    apply_passphrase(key, passphrase)
+}
+
+/// Deterministically derive a NIST P-521 (ECDSA sign+certify) key with a
+/// P-521 ECDH encryption subkey from the imported-seed root and a key index.
+///
+/// A deliberate SIBLING of [`derive_ed25519`], not a refactor of it: this one
+/// duplicates the shape with its own HKDF info prefix (`p521/`). The prefix
+/// domain-separates the two streams — the same root + index yields
+/// independent Ed25519 and P-521 identities.
+///
+/// Reproducibility rests on the raw-bytes contract in
+/// PLAN-openpgp-keys-import.md §2.3, not on any particular rpgp version: any
+/// OpenPGP library that can build a P-521 key from an SEC1 scalar can
+/// reproduce this. The pinned-fingerprint tests in tests/derive.rs gate any
+/// accidental drift.
+pub fn derive_p521(
+    root: &[u8; 32],
+    root_id: &[u8; 4],
+    index: u32,
+    name: &str,
+    email: &str,
+    passphrase: Option<&str>,
+) -> Result<SignedSecretKey, PgpError> {
+    let prk = key_prk(root);
+    let sign_raw: [u8; 80] = expand(&prk, &hkdf_info(b"p521/", index, b"/sign"))?;
+    let enc_raw: [u8; 80] = expand(&prk, &hkdf_info(b"p521/", index, b"/encrypt"))?;
+
+    // Primary: ECDSA (alg 19), curve P-521. `sign_raw` is reduced into a
+    // valid scalar per FIPS 186-4 B.4.1 (see `p521_scalar_from_raw`).
+    let sign_key = p521_secret_key(sign_raw)?;
+    let ecdsa_secret = ecdsa::SecretKey::P521(sign_key);
+    let primary_public_params = PublicParams::ECDSA((&ecdsa_secret).try_into()?);
+    let primary_secret_params = PlainSecretParams::ECDSA(ecdsa_secret);
+
+    // Subkey: ECDH (alg 18), curve P-521.
+    let enc_key = p521_secret_key(enc_raw)?;
+    let ecdh_secret = ecdh::SecretKey::P521 { secret: enc_key };
+    // KDF params (SHA-512 / AES-256) come from `ECCCurve::P521`'s own
+    // `hash_algo()`/`sym_algo()` via this conversion — pinned by
+    // `derive_p521_ecdh_kdf_params_are_sha512_aes256` in tests/derive.rs.
+    let sub_public_params = PublicParams::ECDH((&ecdh_secret).try_into()?);
+    let sub_secret_params = PlainSecretParams::ECDH(ecdh_secret);
+
+    let key = assemble_key(
+        KeyType::ECDSA(ECCCurve::P521).to_alg(),
+        primary_public_params,
+        primary_secret_params,
+        KeyType::ECDH(ECCCurve::P521).to_alg(),
+        sub_public_params,
+        sub_secret_params,
+        name,
+        email,
+        Timestamp::from_secs(DERIVED_KEY_CREATED_AT),
+        Some((root_id, index, DerivedAlg::P521)),
+    )?;
+    apply_passphrase(key, passphrase)
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,6 +1485,15 @@ fn resign_user_id(
             hashed.push(Subpacket::regular(
                 SubpacketData::PreferredCompressionAlgorithms(comp.iter().copied().collect()),
             )?);
+        }
+        // Carry over any notations (in practice: the `derived@byteapps.com`
+        // provenance notation on a derived key) so re-signing paths — expiry
+        // changes, adding a user ID — never silently drop it. See
+        // PLAN-openpgp-keys-import.md §6.
+        for notation in t.notations() {
+            hashed.push(Subpacket::regular(SubpacketData::Notation(
+                notation.clone(),
+            ))?);
         }
     } else {
         // No prior self-sig to copy from: certify+sign primary flags.

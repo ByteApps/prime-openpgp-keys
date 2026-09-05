@@ -202,8 +202,8 @@ fn control_fixed_seed_passes_and_that_is_the_point() {
 // path) never touches it.
 // ---------------------------------------------------------------------
 
-fn fingerprint_of(seed: &[u8; 32], index: u32) -> String {
-    let key = pgp_core::derive_ed25519(seed, index, "Test User", "test@example.com", None)
+fn fingerprint_of(root: &[u8; 32], index: u32) -> String {
+    let key = pgp_core::derive_ed25519(root, &[0xAA, 0xBB, 0xCC, 0xDD], index, "Test User", "test@example.com", None)
         .expect("derive_ed25519 failed");
     let info = pgp_core::key_info(&pgp_core::PgpKey::Secret(key));
     info.fingerprint
@@ -255,29 +255,46 @@ fn generate_rsa_never_uses_the_deterministic_stream() {
         "generate_rsa no longer uses thread_rng() — random keygen must use the system RNG"
     );
     assert!(
-        !body.contains("ChaCha20Rng") && !body.contains("from_seed"),
+        !body.contains("ChaCha20Rng") && !body.contains("from_seed") && !body.contains("SeedableRng"),
         "generate_rsa (the RANDOM keygen path) must never be reachable through the \
          deterministic seed-derived stream — a caller expecting fresh entropy would \
          silently get a reproducible key:\n{body}"
     );
 }
 
+/// PLAN-openpgp-keys-import.md §2.3/§3: the derivation is raw key bytes
+/// (an HKDF expansion feeding straight into `ed25519::SecretKey::try_from_bytes`
+/// / a P-521 scalar), not "whatever rpgp's RNG-driven generator does with a
+/// seeded stream" — the old scheme this replaced, reproducible only by rpgp
+/// 0.20. A seeded RNG anywhere in these functions would silently reintroduce
+/// that library lock-in.
 #[test]
-fn derive_ed25519_is_the_only_deterministic_path() {
-    let body = fn_source("derive_ed25519");
-    assert!(
-        body.contains("ChaCha20Rng::from_seed"),
-        "derive_ed25519 no longer derives its stream via ChaCha20Rng::from_seed — \
-         either the intentional deterministic scheme changed (update this pin \
-         deliberately) or it regressed:\n{body}"
-    );
+fn derive_functions_never_use_a_seeded_rng() {
+    for name in ["derive_ed25519", "derive_p521"] {
+        let body = fn_source(name);
+        assert!(
+            !body.contains("ChaCha") && !body.contains("SeedableRng") && !body.contains("from_seed"),
+            "{name} must derive its key material from HKDF output fed directly into \
+             raw-bytes key constructors, never a seeded RNG (that was the old, \
+             rpgp-only scheme this replaced):\n{body}"
+        );
+        assert!(
+            body.contains("Hkdf") || body.contains("expand("),
+            "{name} no longer visibly uses HKDF expansion — check it still derives \
+             from `root` per PLAN-openpgp-keys-import.md §2.3:\n{body}"
+        );
+    }
 }
 
-/// The recovery contract, pinned to a literal. `derive_ed25519`'s output
-/// commits to the HKDF salt/info strings and to `DERIVED_KEY_CREATED_AT`
-/// (a fingerprint covers the key's creation time), so any drift in those
-/// silently strands every key a user derived before the change — their
-/// seed would no longer reproduce the identity they published.
+/// The recovery contract, pinned to a literal. `derive_p521`'s output
+/// commits to the HKDF salt/info strings (PLAN-openpgp-keys-import.md §2.3)
+/// and to `DERIVED_KEY_CREATED_AT` (a fingerprint covers the key's creation
+/// time), so any drift in those silently strands every key a user derived
+/// before the change — their imported words would no longer reproduce the
+/// identity they published. A more thorough pin (indices 0 and 1, both
+/// algorithms, plus a library-independence proof) lives in tests/derive.rs;
+/// this one exists so the entropy suite's own "derive path is intentional"
+/// story stays self-contained.
 ///
 /// The sibling determinism tests above compare two runs of the SAME
 /// build and cannot see that; only a literal captured from a known-good
@@ -286,12 +303,12 @@ fn derive_ed25519_is_the_only_deterministic_path() {
 /// move this value.
 #[test]
 fn derive_p521_fingerprint_is_pinned() {
-    let key = pgp_core::derive_p521(&[0x11u8; 32], 0, "Test User", "test@example.com", None)
+    let key = pgp_core::derive_p521(&[0x11u8; 32], &[0xAA, 0xBB, 0xCC, 0xDD], 0, "Test User", "test@example.com", None)
         .expect("derive_p521 failed");
     let info = pgp_core::key_info(&pgp_core::PgpKey::Secret(key));
     assert_eq!(
         info.fingerprint,
-        "1DDD40697E9294FDCDE044E7FBF7789F38366E5E",
+        "B142250EDEB58834DD396FE46AF6CD71E92A8F5C",
         "seed-derived P-521 identity changed — same rules as the Ed25519 pin above"
     );
 }
@@ -300,7 +317,7 @@ fn derive_p521_fingerprint_is_pinned() {
 fn derive_ed25519_fingerprint_is_pinned() {
     assert_eq!(
         fingerprint_of(&[0x11u8; 32], 0),
-        "9D53AA0177D528C7B52545083FE08F54CA0D6AF1",
+        "050CC9E9FE9DAF04779E6E3460CF3D7627B974A8",
         "seed-derived identity changed — see the comment above before touching the expected value"
     );
 }

@@ -19,7 +19,32 @@ rsa = { version = "0.9", default-features = false }
 # matching the Rng bound rpgp's generate() takes).
 hkdf = "0.12"
 sha2 = { version = "0.10", default-features = false }
-rand_chacha = "0.3"
+# Imported-seed root derivation (PLAN-openpgp-keys-import.md §2): plain
+# BIP-39 (PBKDF2-HMAC-SHA512), NFKD normalization of mnemonic/passphrase,
+# and zeroizing the intermediates. Pure Rust, no C deps, so it keeps
+# cross-compiling like the rest of this crate.
+pbkdf2 = "0.12"
+unicode-normalization = "0.1"
+zeroize = { version = "1", features = ["derive"] }
+# BIP-32 master-key fingerprint (xfp) of the imported seed, so the UI can
+# show the same fingerprint a hardware wallet shows for the same seed +
+# passphrase. Same versions/features as graffito/notes-core's bip32.rs —
+# pure Rust, no secp256k1-sys.
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+hmac = { version = "0.12", default-features = false }
+ripemd = "0.1"
+# store.rs: sealing the imported-seed root at rest (XChaCha20-Poly1305).
+# default-features off deliberately drops chacha20poly1305's own
+# getrandom/rand_core nonce-generation path (`generate_nonce`) — the nonce
+# is drawn from `rand::rngs::OsRng` (rand 0.8 -> rand_core 0.6 ->
+# getrandom 0.2, the line the workspace vendored-TRNG patch covers) so no
+# getrandom 0.3/0.4 edge is added. "alloc" is needed for the `aead::Aead`
+# Vec-returning API.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# P-521 scalar construction for derive_p521 (PLAN-openpgp-keys-import.md
+# §2.3): same major version rpgp itself resolves, so cargo unifies the two
+# copies — no second implementation of the curve arithmetic in the tree.
+p521 = "0.13"
 
 [dev-dependencies]
 # Entropy tests (tests/entropy.rs, tests/rng_backend.rs) exercise the two
@@ -31,3 +56,16 @@ rand = "0.8"
 # Parses `cargo metadata --format-version 1` JSON for the dependency-graph
 # guard in tests/rng_backend.rs. Same major already resolved in Cargo.lock.
 serde_json = "1"
+# Independent BIP-39 implementation used ONLY as a cross-check in
+# tests/import.rs (mnemonic -> seed for random mnemonics); never used by
+# the derivation itself. Same crate/version graffito/app-core uses.
+bip39 = "2"
+# Library-independence proof (tests/derive.rs): recompute the derived key
+# material from the PLAN-openpgp-keys-import.md §2.3 spec using crates other
+# than rpgp, and confirm the public key material matches byte-for-byte.
+# Same majors rpgp itself resolves (unified, not a second implementation).
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# Independent cross-check of the P-521 scalar reduction (`be_reduce` in
+# src/lib.rs) against a general-purpose bignum library.
+num-bigint = "0.4"
