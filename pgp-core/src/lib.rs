@@ -34,6 +34,11 @@
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// Sealing/opening the imported-seed root at rest (PLAN-openpgp-keys-import.md
+/// §4). Pure functions of the sealing seed — the app layer reads/writes the
+/// AppData file.
+pub mod store;
+
 use pgp::composed::{
     ArmorOptions, DetachedSignature, EncryptionCaps, KeyType, Message, MessageBuilder,
     PublicOrSecret, SecretKeyParamsBuilder, SubkeyParamsBuilder,

@@ -20,6 +20,15 @@ rsa = { version = "0.9", default-features = false }
 hkdf = "0.12"
 sha2 = { version = "0.10", default-features = false }
 rand_chacha = "0.3"
+# store.rs: sealing the imported-seed root at rest (XChaCha20-Poly1305).
+# default-features off deliberately drops chacha20poly1305's own
+# getrandom/rand_core nonce-generation path (`generate_nonce`) — the nonce
+# is drawn from `rand::rngs::OsRng` (rand 0.8 -> rand_core 0.6 ->
+# getrandom 0.2, the line the workspace vendored-TRNG patch covers) so no
+# getrandom 0.3/0.4 edge is added. "alloc" is needed for the `aead::Aead`
+# Vec-returning API.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # Entropy tests (tests/entropy.rs, tests/rng_backend.rs) exercise the two
