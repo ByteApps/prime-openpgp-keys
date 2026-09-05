@@ -9,7 +9,7 @@ OpenPGP Keys turns your Passport Prime into a personal certificate authority. Cr
   &nbsp;
   <img src="screenshots/key-detail.png" alt="Key detail" width="280">
   &nbsp;
-  <img src="screenshots/derive-from-seed.png" alt="Derive from seed" width="280">
+  <img src="screenshots/import-seed.png" alt="Import a seed" width="280">
 </p>
 
 ## Features

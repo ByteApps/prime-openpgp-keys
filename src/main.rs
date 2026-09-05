@@ -1565,16 +1565,21 @@ fn set_detail(ui: &AppWindow, filename: &str, info: &KeyInfo) {
         },
     ];
     // Self-described provenance (the derived@byteapps.com notation): which
-    // imported seed and account number re-create this key.
+    // imported seed and account number re-create this key. Sits right
+    // after Algorithm so it is visible without scrolling under the
+    // action bar (the README shot shows it).
     if let Some(p) = &info.provenance {
         let alg = match p.alg {
             pgp_core::DerivedAlg::Ed25519 => "Ed25519",
             pgp_core::DerivedAlg::P521 => "P-521",
         };
-        rows.push(DetailRow {
-            label: "Derived from".into(),
-            value: format!("Seed ID {} · account {} · {}", hex_upper(&p.root_id), p.index, alg).into(),
-        });
+        rows.insert(
+            3,
+            DetailRow {
+                label: "Derived from".into(),
+                value: format!("Seed ID {} · account {} · {}", hex_upper(&p.root_id), p.index, alg).into(),
+            },
+        );
     }
     for sub in &info.subkeys {
         rows.push(DetailRow {
