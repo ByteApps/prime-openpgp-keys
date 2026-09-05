@@ -199,3 +199,35 @@ pub fn derive_root(mnemonic_raw: &str, passphrase_raw: &str) -> Result<Root, Pgp
 
     Ok(Root { root, root_id, words, pass_used, xfp })
 }
+
+/// Decode a scanned SeedQR payload into a space-separated mnemonic
+/// (NOT yet normalized/checksum-validated — pass the result through
+/// [`normalize_mnemonic`], same as any typed mnemonic).
+///
+/// Two SeedQR encodings exist, distinguished by shape alone:
+/// - **Standard SeedQR**: an ASCII digit string, 48 chars (12 words) or
+///   96 chars (24 words) — every 4 digits is a wordlist index `0..2047`.
+/// - **CompactSeedQR**: raw entropy bytes, 16 (12 words) or 32 (24
+///   words) — fed straight through [`bip39::entropy_to_mnemonic`].
+///
+/// Anything else (wrong length, non-digit standard-form payload, or an
+/// out-of-range index) is rejected with "Not a SeedQR".
+pub fn seedqr_to_mnemonic(data: &[u8]) -> Result<String, PgpError> {
+    if matches!(data.len(), 48 | 96) && data.iter().all(u8::is_ascii_digit) {
+        let list = bip39::wordlist();
+        let mut words = Vec::with_capacity(data.len() / 4);
+        for group in data.chunks_exact(4) {
+            // `group` is 4 ASCII digits, checked above — always valid UTF-8
+            // and always parses as a number.
+            let text = std::str::from_utf8(group).expect("ascii digits are valid utf8");
+            let idx: usize = text.parse().expect("4 ascii digits always parse");
+            let word = list.get(idx).ok_or_else(|| PgpError("Not a SeedQR".into()))?;
+            words.push(*word);
+        }
+        return Ok(words.join(" "));
+    }
+    if matches!(data.len(), 16 | 32) {
+        return bip39::entropy_to_mnemonic(data);
+    }
+    Err(PgpError("Not a SeedQR".into()))
+}

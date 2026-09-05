@@ -11,6 +11,7 @@
 
 use pgp_core::import::{
     bip39, derive_root, mnemonic_to_seed64, normalize_mnemonic, normalize_passphrase,
+    seedqr_to_mnemonic,
 };
 use sha2::{Digest, Sha256};
 
@@ -237,6 +238,66 @@ fn pinned_roots_differ_by_passphrase() {
     assert_ne!(a.root.as_slice(), b.root.as_slice());
     assert_ne!(a.root_id, b.root_id);
     assert_ne!(a.xfp, b.xfp);
+}
+
+// ---------------------------------------------------------------------
+// SeedQR decoding (standard + CompactSeedQR)
+// ---------------------------------------------------------------------
+
+#[test]
+fn seedqr_standard_12word_all_abandon_about() {
+    // "abandon" x11 (index 0) + "about" (index 3): 11 groups of "0000"
+    // plus one "0003" = 44 zeros followed by "0003", 48 digits total.
+    let digits = "0000".repeat(11) + "0003";
+    assert_eq!(digits.len(), 48);
+    let mnemonic = seedqr_to_mnemonic(digits.as_bytes()).unwrap();
+    assert_eq!(mnemonic, TREZOR_MNEMONIC);
+    // And it's a valid, checksum-correct mnemonic on its own.
+    normalize_mnemonic(&mnemonic).unwrap();
+}
+
+#[test]
+fn seedqr_standard_24word_round_trips_through_indices() {
+    // Build a standard-SeedQR digit string from REF_MNEMONIC's own word
+    // indices, then decode it back and check we recover the same words.
+    let list = bip39::wordlist();
+    let words: Vec<&str> = REF_MNEMONIC.split(' ').collect();
+    assert_eq!(words.len(), 24);
+    let digits: String = words
+        .iter()
+        .map(|w| {
+            let idx = list.binary_search(w).unwrap();
+            format!("{idx:04}")
+        })
+        .collect();
+    assert_eq!(digits.len(), 96);
+
+    let mnemonic = seedqr_to_mnemonic(digits.as_bytes()).unwrap();
+    assert_eq!(mnemonic, REF_MNEMONIC);
+}
+
+#[test]
+fn seedqr_compact_12_and_24_byte_forms() {
+    for entropy in [&[0u8; 16][..], &[0u8; 32][..], &[0xffu8; 16][..], &[0xffu8; 32][..]] {
+        let want = bip39::entropy_to_mnemonic(entropy).unwrap();
+        let got = seedqr_to_mnemonic(entropy).unwrap();
+        assert_eq!(got, want);
+    }
+}
+
+#[test]
+fn seedqr_rejects_wrong_shapes() {
+    // Wrong length entirely.
+    assert_eq!(seedqr_to_mnemonic(&[0u8; 10]).unwrap_err().0, "Not a SeedQR");
+    // Right length for standard form, but not all ASCII digits.
+    let mut not_digits = [b'0'; 48];
+    not_digits[0] = b'x';
+    assert_eq!(seedqr_to_mnemonic(&not_digits).unwrap_err().0, "Not a SeedQR");
+    // Right length for standard form, all digits, but an out-of-range index
+    // (2048 does not name a wordlist entry).
+    let oob = "0000".repeat(11) + "2048";
+    assert_eq!(oob.len(), 48);
+    assert_eq!(seedqr_to_mnemonic(oob.as_bytes()).unwrap_err().0, "Not a SeedQR");
 }
 
 /// Sanity check for the fixed-width hex helpers used above/in the app —

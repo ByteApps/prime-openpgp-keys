@@ -19,6 +19,11 @@ security::use_api!();
 /// App-managed keychain directory on Internal (User) storage.
 const KEYS_DIR: &str = "/pgp-keys";
 
+/// Sealed imported-seed root — per-app, hidden, wiped on uninstall (unlike
+/// `Location::User`, where `.asc` keys live and survive uninstall).
+/// PLAN-openpgp-keys-import.md §4.
+const IMPORTED_KEY_PATH: &str = "/imported_key";
+
 type Fs = fs::FileSystem<fs_permissions::FileSystemPermissions>;
 
 struct CurrentKey {
@@ -80,6 +85,25 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         if !matches!(e, fs::Error::FileAlreadyExists) {
             log::warn!("could not create {KEYS_DIR}: {e:?}");
         }
+    }
+
+    // Populate the imported-seed header from the sealed file's CLEARTEXT
+    // metadata only — never call `app_seed()` at boot, which would raise
+    // the grant-on-first-use permission sheet before the user has done
+    // anything. `root-xfp` stays blank until an import/derive opens the
+    // blob (it lives inside the encryption).
+    match fs.open_file(IMPORTED_KEY_PATH, Location::AppData, OpenFlags::READ_ONLY) {
+        Ok(mut file) => {
+            let mut buf = Vec::new();
+            if file.read_to_end(&mut buf).is_ok() {
+                match pgp_core::store::peek_meta(&buf) {
+                    Ok(meta) => set_root_ui(&ui, &meta, None),
+                    Err(e) => log::warn!("stored imported-seed root unreadable: {e}"),
+                }
+            }
+        }
+        Err(fs::Error::FileNotFound) => {}
+        Err(e) => log::warn!("could not open {IMPORTED_KEY_PATH}: {e:?}"),
     }
 
     // Re-scan /pgp-keys and push rows into the KeyList global.
@@ -455,6 +479,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 u.set_create_mode(0);
                 u.set_create_account("0".into());
                 u.set_create_expiry_index(3); // default: 2 years
+                clear_import_fields(&ui);
                 show_info(&ui, "");
                 u.set_screen(3);
             }
@@ -466,6 +491,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let refresh_keys = refresh_keys.clone();
         callbacks.on_cancel_create(move || {
             if let Some(ui) = ui_weak.upgrade() {
+                clear_import_fields(&ui);
                 show_info(&ui, "");
                 ui.global::<Ui>().set_screen(0);
             }
@@ -566,7 +592,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         });
     }
 
-    // Derive an Ed25519 key from the device master seed (GetAppSeed).
+    // Derive an Ed25519/P-521 key from the imported-seed root (opened with
+    // GetAppSeed each time — the root itself never lives in app state).
     {
         let fs = fs.clone();
         let ui_weak = ui_weak.clone();
@@ -589,11 +616,11 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 }
             };
 
-            // 0 = Ed25519 (the original scheme), 1 = P-521 (domain-separated).
+            // 0 = Ed25519 (the default), 1 = P-521 (domain-separated).
             let algo_log = if algo == 1 { "p521-derived" } else { "ed25519-derived" };
             let u = ui.global::<Ui>();
             let expiry_days = expiry_days_for_index(u.get_create_expiry_index());
-            u.set_busy_text(format!("Deriving key #{index} from device seed…").into());
+            u.set_busy_text(format!("Deriving key #{index} from your imported seed…").into());
             u.set_busy(true);
 
             let fs = fs.clone();
@@ -603,14 +630,16 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             Timer::single_shot(Duration::from_millis(150), move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let passphrase = if pass.is_empty() { None } else { Some(pass.as_str()) };
-                let result = Security::default()
-                    .app_seed()
-                    .map_err(|_| "Device locked or seed unavailable".to_string())
-                    .and_then(|app_seed| {
+                let result = open_imported_root(&fs)
+                    .and_then(|unsealed| {
+                        // Known only inside the encryption — update the UI
+                        // header the moment the blob is opened, regardless
+                        // of whether the derivation itself later fails.
+                        ui.global::<Ui>().set_root_xfp(hex_lower(unsealed.xfp.as_slice()).into());
                         if algo == 1 {
-                            pgp_core::derive_p521(&app_seed, index, name.trim(), email.trim(), passphrase)
+                            pgp_core::derive_p521(&unsealed.root, index, name.trim(), email.trim(), passphrase)
                         } else {
-                            pgp_core::derive_ed25519(&app_seed, index, name.trim(), email.trim(), passphrase)
+                            pgp_core::derive_ed25519(&unsealed.root, index, name.trim(), email.trim(), passphrase)
                         }
                         .map_err(|e| e.0)
                     })
@@ -638,7 +667,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                         );
                         refresh_keys();
                         open_key(filename);
-                        show_info(&ui, &format!("Key #{index} derived from device seed"));
+                        show_info(&ui, &format!("Key #{index} derived from your imported seed"));
                     }
                     Err(e) => {
                         log::info!("cb: create-key {algo_log} idx={index} err={e}");
@@ -646,6 +675,159 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     }
                 }
             });
+        });
+    }
+
+    // --- Imported-seed root: import / forget ---
+
+    {
+        let ui_weak = ui_weak.clone();
+        callbacks.on_import_mnemonic_edited(move |text| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            update_import_status(&ui, &text);
+        });
+    }
+
+    {
+        let ui_weak = ui_weak.clone();
+        callbacks.on_apply_suggestion(move |word| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let current = ui.global::<Ui>().get_import_mnemonic().to_string();
+            let mut parts: Vec<&str> = current.split(' ').collect();
+            match parts.last_mut() {
+                Some(last) => *last = word.as_str(),
+                None => parts.push(word.as_str()),
+            }
+            let mut new_text = parts.join(" ");
+            new_text.push(' ');
+            update_import_status(&ui, &new_text);
+        });
+    }
+
+    {
+        let ui_weak = ui_weak.clone();
+        callbacks.on_start_import_seed_qr(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let opts = ScanQrOptions {
+                header_title: "Scan SeedQR".into(),
+                message: "Point at a standard or Compact SeedQR".into(),
+                ..ScanQrOptions::default()
+            };
+            // Blocks while the system scanner modal owns the screen — same
+            // synchronous pattern as the sign-QR flow.
+            let scanned = match open_qr_scanner::<gui_permissions::GuiPermissions>(opts) {
+                Ok(Some(ScanQrResult::Qr { data, .. })) => data,
+                Ok(Some(ScanQrResult::Ur2 { ur_type, data, .. })) => {
+                    log::info!("cb: import-seed-qr scanned ur={ur_type}");
+                    data
+                }
+                Ok(_) => {
+                    log::info!("cb: import-seed-qr cancelled");
+                    return;
+                }
+                Err(e) => {
+                    log::info!("cb: import-seed-qr err=scanner {e:?}");
+                    show_error(&ui, format!("QR scanner unavailable: {e:?}"));
+                    return;
+                }
+            };
+            match pgp_core::import::seedqr_to_mnemonic(&scanned) {
+                Ok(mnemonic) => {
+                    log::info!("cb: import-seed-qr ok words={}", mnemonic.split(' ').count());
+                    update_import_status(&ui, &mnemonic);
+                }
+                Err(e) => {
+                    log::info!("cb: import-seed-qr err={}", e.0);
+                    show_error(&ui, e.0);
+                }
+            }
+        });
+    }
+
+    {
+        let fs = fs.clone();
+        let ui_weak = ui_weak.clone();
+        callbacks.on_import_seed(move |mnemonic, passphrase| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let mnemonic = mnemonic.to_string();
+            let passphrase = passphrase.to_string();
+
+            let u = ui.global::<Ui>();
+            u.set_busy_text("Importing seed…".into());
+            u.set_busy(true);
+
+            let fs = fs.clone();
+            let ui_weak = ui_weak.clone();
+            Timer::single_shot(Duration::from_millis(150), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+
+                let result = pgp_core::import::derive_root(&mnemonic, &passphrase)
+                    .map_err(|e| e.0)
+                    .and_then(|root| {
+                        let app_seed = Security::default()
+                            .app_seed()
+                            .map_err(|_| "Device locked or seed unavailable".to_string())?;
+                        let meta = pgp_core::store::RootMeta {
+                            words: root.words,
+                            pass_used: root.pass_used,
+                            root_id: root.root_id,
+                        };
+                        let blob = pgp_core::store::seal_root(&app_seed, &meta, &root.root, &root.xfp)
+                            .map_err(|e| e.0)?;
+                        fs.open_file(IMPORTED_KEY_PATH, Location::AppData, OpenFlags::CREATE)
+                            .and_then(|mut f| f.overwrite(&blob))
+                            .map_err(|e| err_msg(&e))?;
+                        // Read back and open before reporting success — no
+                        // FlushFs for third-party apps (KeyOS#9).
+                        let verify = read_bytes(&fs, IMPORTED_KEY_PATH, Location::AppData)?;
+                        pgp_core::store::open_root(&app_seed, &verify).map_err(|e| e.0)
+                    });
+
+                ui.global::<Ui>().set_busy(false);
+                // Blank the typed words/passphrase the moment this callback
+                // returns — Slint `SharedString` can't be zeroized, so the
+                // Rust-side `Root`/`UnsealedRoot` (both `Zeroizing`) are the
+                // only copies that get cleaned up automatically, and this
+                // clears the UI-side copy right away.
+                clear_import_fields(&ui);
+
+                match result {
+                    Ok((meta, unsealed)) => {
+                        log::info!(
+                            "cb: import-seed ok root_id={} words={} pass={}",
+                            hex_upper(&meta.root_id),
+                            meta.words,
+                            meta.pass_used as u8
+                        );
+                        set_root_ui(&ui, &meta, Some(unsealed.xfp.as_slice()));
+                        show_info(&ui, "Seed imported");
+                    }
+                    Err(e) => {
+                        log::info!("cb: import-seed err={e}");
+                        show_error(&ui, e);
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let fs = fs.clone();
+        let ui_weak = ui_weak.clone();
+        callbacks.on_forget_seed(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let root_id = ui.global::<Ui>().get_root_id().to_string();
+            match fs.remove(IMPORTED_KEY_PATH, Location::AppData) {
+                Ok(()) => {
+                    log::info!("cb: forget-seed ok root_id={root_id}");
+                    clear_root_ui(&ui);
+                    show_info(&ui, "Imported seed forgotten");
+                }
+                Err(e) => {
+                    log::info!("cb: forget-seed err={}", err_msg(&e));
+                    show_error(&ui, err_msg(&e));
+                }
+            }
         });
     }
 
@@ -1132,6 +1314,105 @@ fn save_key(fs: &Fs, key: &PgpKey) -> Result<String, String> {
         .and_then(|mut f| f.overwrite(armored.as_bytes()))
         .map_err(|e| err_msg(&e))?;
     Ok(filename)
+}
+
+// ---------------------------------------------------------------------------
+// Imported-seed root (PLAN-openpgp-keys-import.md §4-5)
+// ---------------------------------------------------------------------------
+
+fn hex_upper(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Populate the `Ui.root-*` header from a sealed blob's metadata. `xfp` is
+/// `None` at boot (cleartext header only, no `app_seed()` call) and
+/// `Some` right after an import/derive that actually opened the blob.
+fn set_root_ui(ui: &AppWindow, meta: &pgp_core::store::RootMeta, xfp: Option<&[u8]>) {
+    let u = ui.global::<Ui>();
+    u.set_has_imported_root(true);
+    u.set_root_id(hex_upper(&meta.root_id).into());
+    u.set_root_words(meta.words as i32);
+    u.set_root_pass_used(meta.pass_used);
+    u.set_root_xfp(xfp.map(hex_lower).unwrap_or_default().into());
+}
+
+fn clear_root_ui(ui: &AppWindow) {
+    let u = ui.global::<Ui>();
+    u.set_has_imported_root(false);
+    u.set_root_id("".into());
+    u.set_root_words(0);
+    u.set_root_pass_used(false);
+    u.set_root_xfp("".into());
+}
+
+/// Blank the import-seed flow's typed fields. Slint `SharedString` can't be
+/// zeroized, so this is the UI-side half of "never store the words" — call
+/// it the moment an import attempt (success or failure) returns, and when
+/// leaving the create screen.
+fn clear_import_fields(ui: &AppWindow) {
+    let u = ui.global::<Ui>();
+    u.set_import_mnemonic("".into());
+    u.set_import_passphrase("".into());
+    u.set_import_status("".into());
+    u.set_import_suggestions(ModelRc::new(VecModel::from(
+        Vec::<slint_keyos_platform::slint::SharedString>::new(),
+    )));
+}
+
+/// Recompute the import-seed flow's live status/suggestions from the
+/// current (possibly mid-typed) mnemonic text, and normalize away any
+/// embedded newline: a multi-line field that is really a single paragraph
+/// treats a typed `\n` as "done" rather than literal input, so it's
+/// stripped here and the on-screen keyboard is asked to drop (via a nonce
+/// the Slint side watches to `clear-focus()`, since Rust can't call a
+/// method on a specific UI element directly).
+fn update_import_status(ui: &AppWindow, raw: &str) {
+    let text = raw.replace('\n', "");
+    let u = ui.global::<Ui>();
+    u.set_import_mnemonic(text.clone().into());
+
+    let suggestions: Vec<slint_keyos_platform::slint::SharedString> = match text.rsplit(' ').next()
+    {
+        Some(partial) if !partial.is_empty() => pgp_core::import::bip39::suggest(partial, 4)
+            .into_iter()
+            .map(slint_keyos_platform::slint::SharedString::from)
+            .collect(),
+        _ => Vec::new(),
+    };
+    u.set_import_suggestions(ModelRc::new(VecModel::from(suggestions)));
+
+    let count = text.split_whitespace().count();
+    let mut status = if count == 0 { String::new() } else { format!("{count}/24 words") };
+    if matches!(count, 12 | 24) {
+        status.push_str(if pgp_core::import::normalize_mnemonic(&text).is_ok() {
+            " · checksum ok"
+        } else {
+            " · checksum invalid"
+        });
+    }
+    u.set_import_status(status.into());
+
+    if raw.contains('\n') {
+        u.set_import_mnemonic_dismiss_nonce(u.get_import_mnemonic_dismiss_nonce().wrapping_add(1));
+    }
+}
+
+/// Open the sealed imported-seed root: read `/imported_key`, call
+/// `app_seed()` (grant-on-first-use — expected here, never at boot), and
+/// unseal it. The root never lives in app `State`; every derive re-reads
+/// and re-opens it.
+fn open_imported_root(fs: &Fs) -> Result<pgp_core::store::UnsealedRoot, String> {
+    let blob = read_bytes(fs, IMPORTED_KEY_PATH, Location::AppData)
+        .map_err(|_| "No imported seed — import one first".to_string())?;
+    let app_seed = Security::default()
+        .app_seed()
+        .map_err(|_| "Device locked or seed unavailable".to_string())?;
+    let (_meta, unsealed) = pgp_core::store::open_root(&app_seed, &blob).map_err(|e| e.0)?;
+    Ok(unsealed)
 }
 
 fn loc_name(loc: Location) -> &'static str {

@@ -104,6 +104,26 @@ export global Ui {
     in-out property <int> create-mode: 0;         // 0 = random, 1 = from seed
     in-out property <string> create-account: "0"; // derivation index for from-seed mode
 
+    // Imported-seed root (From-seed mode). Populated at boot (from the
+    // sealed file's cleartext header, no app-seed call) and after a
+    // successful import/derive/forget.
+    in-out property <bool> has-imported-root: false;
+    in-out property <string> root-id: "";         // 8 upper-hex chars
+    in-out property <int> root-words: 0;          // 12 or 24
+    in-out property <bool> root-pass-used: false;
+    in-out property <string> root-xfp: "";        // 8 lower-hex chars; blank until known
+    in-out property <bool> show-forget-seed: false; // "Forget imported seed" confirmation
+
+    // Import-seed flow fields (From-seed mode, no root yet).
+    in-out property <string> import-mnemonic: "";
+    in-out property <string> import-passphrase: "";
+    in-out property <string> import-status: "";   // e.g. "12/24 words · checksum ok"
+    in-out property <[string]> import-suggestions: []; // up to 4 completions
+    // Bumped whenever Rust strips a typed newline out of the mnemonic
+    // field; the field's container watches this to clear-focus() (Rust
+    // can't call a method on a specific UI element directly).
+    in-out property <int> import-mnemonic-dismiss-nonce: 0;
+
     // Busy overlay (key generation).
     in-out property <bool> busy: false;
     in property <string> busy-text: "";
@@ -128,6 +148,13 @@ export global Callbacks {
     callback cancel-create();
     callback create-key(string, string, int, int, int, string); // name, email, algo, rsa-bits-index, nistp-index, passphrase
     callback create-derived-key(string, string, string, int, string); // name, email, account index, algo, passphrase
+
+    // Imported-seed root (From-seed mode).
+    callback import-mnemonic-edited(string);      // full field text, recomputes status + suggestions
+    callback apply-suggestion(string);            // tapped chip: replace the in-progress word
+    callback start-import-seed-qr();              // open the system QR scanner for a SeedQR
+    callback import-seed(string, string);         // mnemonic, seed passphrase
+    callback forget-seed();                       // deletes the sealed root file only
 
     callback extend-expiry(string, string);       // days ("" = never), passphrase
     callback add-uid(string, string, string);     // name, email, passphrase

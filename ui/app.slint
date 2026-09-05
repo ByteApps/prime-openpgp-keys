@@ -3,6 +3,7 @@ import { Callbacks, KeyList, Detail, Browser, Ui, KeyRow, DetailRow, FileRow } f
 import { Button } from "@ui/button.slint";
 import { Icon } from "@ui/icon.slint";
 import { Input } from "@ui/input.slint";
+import { TextArea } from "@ui/textarea.slint";
 import { SegmentedControl } from "@ui/segmented_control.slint";
 import { Dialog, DialogVariant } from "@ui/dialog.slint";
 import { Checkbox } from "@ui/checkbox.slint";
@@ -652,8 +653,10 @@ component CreateView inherits VerticalLayout {
             spacing: 14px;
 
                 // Keyboard "Done" blurs each field so the on-screen keyboard drops away
-                // and the controls below stay tappable.
-                create-name-input := Input {
+                // and the controls below stay tappable. Hidden in From-seed mode until
+                // a root is imported — these belong to the derive form, not the import
+                // flow that replaces it.
+                if Ui.create-mode == 0 || Ui.has-imported-root: create-name-input := Input {
                     label: "Name";
                     placeholder: "Alice Example";
                     value <=> Ui.create-name;
@@ -661,7 +664,7 @@ component CreateView inherits VerticalLayout {
                         create-name-input.clear-focus();
                     }
                 }
-                create-email-input := Input {
+                if Ui.create-mode == 0 || Ui.has-imported-root: create-email-input := Input {
                     label: "Email";
                     placeholder: "alice@example.com";
                     value <=> Ui.create-email;
@@ -669,8 +672,8 @@ component CreateView inherits VerticalLayout {
                         create-email-input.clear-focus();
                     }
                 }
-                create-pass-input := PassInput {
-                    label: "Passphrase (optional)";
+                if Ui.create-mode == 0 || Ui.has-imported-root: create-pass-input := PassInput {
+                    label: "Key passphrase (optional)";
                     placeholder: "Passphrase";
                     value <=> Ui.create-pass;
                 }
@@ -764,14 +767,137 @@ component CreateView inherits VerticalLayout {
                     font-size: 13px;
                     wrap: word-wrap;
                 }
-                if Ui.create-mode == 1: Text {
+                // From-seed, no root imported yet: replace the derive form
+                // entirely with the import-a-seed flow.
+                if Ui.create-mode == 1 && !Ui.has-imported-root: import-seed-section := VerticalLayout {
+                    spacing: 14px;
+                    // Watched so Rust can ask the mnemonic field to drop the
+                    // on-screen keyboard after stripping a typed newline —
+                    // Rust can't call a method on a specific UI element
+                    // directly, so it bumps this instead.
+                    property <int> dismiss-nonce <=> Ui.import-mnemonic-dismiss-nonce;
+                    changed dismiss-nonce => {
+                        mnemonic-input.clear-focus();
+                    }
+
+                    Text {
+                        text: "Import a seed";
+                        color: Theme.palette-muted;
+                        font-family: "Montserrat";
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "Enter your 12 or 24 BIP-39 words. They are never stored: the app keeps only a key derived from them, mixed with an app-specific salt, so it cannot spend bitcoin from the same seed. The words are your backup.";
+                        color: Theme.palette-muted;
+                        font-family: "Montserrat";
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+
+                    mnemonic-input := TextArea {
+                        label: "Mnemonic (12 or 24 words)";
+                        placeholder: "word1 word2 word3 …";
+                        value <=> Ui.import-mnemonic;
+                        min-rows: 4;
+                        max-rows: 6;
+                        changed(text) => {
+                            Callbacks.import-mnemonic-edited(text);
+                        }
+                    }
+
+                    if Ui.import-suggestions.length > 0: HorizontalLayout {
+                        height: 40px;
+                        spacing: 8px;
+                        for word in Ui.import-suggestions: Rectangle {
+                            height: 32px;
+                            width: chip-text.preferred-width + 24px;
+                            border-radius: 16px;
+                            background: chip-touch.pressed
+                                ? Theme.palette-secondary-pressed
+                                : Theme.palette-secondary;
+
+                            chip-text := Text {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                text: word;
+                                color: Theme.palette-foreground;
+                                font-family: "Montserrat";
+                                font-size: 13px;
+                            }
+
+                            chip-touch := TouchArea {
+                                width: parent.width;
+                                height: parent.height;
+                                clicked => {
+                                    Callbacks.apply-suggestion(word);
+                                }
+                            }
+                        }
+                    }
+
+                    if Ui.import-status != "": Text {
+                        text: Ui.import-status;
+                        color: Theme.palette-muted;
+                        font-family: "Montserrat";
+                        font-size: 13px;
+                    }
+
+                    import-pass-input := PassInput {
+                        label: "Seed passphrase (BIP-39, optional)";
+                        placeholder: "Passphrase";
+                        value <=> Ui.import-passphrase;
+                    }
+
+                    Button {
+                        full-width: true;
+                        variant: ButtonVariant.secondary;
+                        text: "Scan SeedQR";
+                        clicked => {
+                            Callbacks.start-import-seed-qr();
+                        }
+                    }
+                }
+
+                // From-seed, root already imported: the derive form, headed
+                // by which seed it's deriving from.
+                if Ui.create-mode == 1 && Ui.has-imported-root: HorizontalLayout {
+                    height: 28px;
+                    spacing: 8px;
+                    Text {
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        text: "Imported seed · ID " + Ui.root-id
+                            + (Ui.root-xfp != "" ? " · fingerprint " + Ui.root-xfp : "");
+                        color: Theme.palette-muted;
+                        font-family: "Montserrat";
+                        font-size: 13px;
+                        overflow: elide;
+                    }
+                    forget-touch := TouchArea {
+                        width: forget-text.preferred-width + 8px;
+                        height: parent.height;
+                        clicked => {
+                            Ui.show-forget-seed = true;
+                        }
+                        forget-text := Text {
+                            vertical-alignment: center;
+                            text: "Forget…";
+                            color: Theme.palette-danger;
+                            font-family: "Montserrat";
+                            font-size: 13px;
+                            font-weight: 600;
+                        }
+                    }
+                }
+                if Ui.create-mode == 1 && Ui.has-imported-root: Text {
                     text: "Algorithm";
                     color: Theme.palette-muted;
                     font-family: "Montserrat";
                     font-size: 13px;
                     font-weight: 700;
                 }
-                if Ui.create-mode == 1: HorizontalLayout {
+                if Ui.create-mode == 1 && Ui.has-imported-root: HorizontalLayout {
                     height: 64px;
                     SegmentedControl {
                         horizontal-stretch: 1;
@@ -781,7 +907,7 @@ component CreateView inherits VerticalLayout {
                 }
                 // The algorithm choice is part of the recovery recipe: each
                 // algorithm derives an independent key from the same account.
-                if Ui.create-mode == 1: Text {
+                if Ui.create-mode == 1 && Ui.has-imported-root: Text {
                     text: (Ui.create-seed-algo == 1
                         ? "NIST P-521 (secp521r1; ECDSA + ECDH, v4 key) — about 256-bit strength, the strongest option. Needs ECC-aware PGP software (GnuPG 2.1+, Thunderbird, Sequoia)."
                         : "Ed25519 + Curve25519 (v4 key) — modern & fast, the default; ~128-bit strength, and this app's original derivation scheme. Works with GnuPG 2.1+, Thunderbird, Proton, Sequoia, GitHub.")
@@ -791,11 +917,11 @@ component CreateView inherits VerticalLayout {
                     font-size: 13px;
                     wrap: word-wrap;
                 }
-                // From-seed keys are deterministically derived from the device
-                // master seed: the same account number + algorithm always
-                // recreates the same key, so a seed-phrase restore recovers
-                // the identity.
-                if Ui.create-mode == 1: create-account-input := Input {
+                // From-seed keys are deterministically derived from your
+                // imported seed: the same account number + algorithm always
+                // recreates the same key, so re-importing the same words
+                // recovers the identity.
+                if Ui.create-mode == 1 && Ui.has-imported-root: create-account-input := Input {
                     label: "Account number (same number = same key)";
                     placeholder: "0";
                     value <=> Ui.create-account;
@@ -805,7 +931,7 @@ component CreateView inherits VerticalLayout {
                 }
                 // The date has to be a fixed constant: the OpenPGP fingerprint commits to
                 // the creation timestamp, so a "real" date would break re-derivation.
-                if Ui.create-mode == 1: Text {
+                if Ui.create-mode == 1 && Ui.has-imported-root: Text {
                     text: "Derived keys are always dated 2009-01-03. The date is part of the key's fingerprint, so it must be fixed for the same account to re-create the same key. It is public metadata and does not weaken the key.";
                     color: Theme.palette-muted;
                     font-family: "Montserrat";
@@ -813,14 +939,17 @@ component CreateView inherits VerticalLayout {
                     wrap: word-wrap;
                 }
 
-                Text {
+                // Hidden during the import-a-seed flow (no key is being
+                // created yet — the derive form below appears once a root
+                // is imported, and it shares this Expires row).
+                if Ui.create-mode == 0 || Ui.has-imported-root: Text {
                     text: "Expires";
                     color: Theme.palette-muted;
                     font-family: "Montserrat";
                     font-size: 13px;
                     font-weight: 700;
                 }
-                HorizontalLayout {
+                if Ui.create-mode == 0 || Ui.has-imported-root: HorizontalLayout {
                     height: 64px;
                     SegmentedControl {
                         horizontal-stretch: 1;
@@ -832,7 +961,7 @@ component CreateView inherits VerticalLayout {
                 // it never changes the fingerprint, so a derived key with any
                 // expiry still re-derives to the same key, and it can be
                 // extended later from the key's Expiry action.
-                Text {
+                if Ui.create-mode == 0 || Ui.has-imported-root: Text {
                     text: Ui.create-expiry-index == 6
                         ? "The key never expires. You can add an expiration later."
                         : "The key expires and stops being usable for new signatures/encryption after this period. You can extend it anytime from the key's Expiry action — expiration is a safety net, not a deadline.";
@@ -844,10 +973,14 @@ component CreateView inherits VerticalLayout {
 
                 Button {
                     full-width: true;
-                    text: Ui.create-mode == 1 ? "Derive" : "Generate";
+                    text: Ui.create-mode == 1 ? (Ui.has-imported-root ? "Derive" : "Import") : "Generate";
                     clicked => {
                         if (Ui.create-mode == 1) {
-                            Callbacks.create-derived-key(Ui.create-name, Ui.create-email, Ui.create-account, Ui.create-seed-algo, Ui.create-pass);
+                            if (Ui.has-imported-root) {
+                                Callbacks.create-derived-key(Ui.create-name, Ui.create-email, Ui.create-account, Ui.create-seed-algo, Ui.create-pass);
+                            } else {
+                                Callbacks.import-seed(Ui.import-mnemonic, Ui.import-passphrase);
+                            }
                         } else {
                             Callbacks.create-key(Ui.create-name, Ui.create-email, Ui.create-algo, Ui.create-rsa-bits-index, Ui.create-nistp-index, Ui.create-pass);
                         }
@@ -1464,6 +1597,69 @@ export component AppWindow inherits Window {
                     clicked => {
                         Ui.show-delete = false;
                         Callbacks.delete-key(Detail.filename);
+                    }
+                }
+            }
+        }
+
+        if Ui.show-forget-seed: forget-seed-dialog := Dialog {
+            width: 100%;
+            height: 100%;
+            open: true;
+            variant: DialogVariant.danger;
+            dismissed => {
+                Ui.show-forget-seed = false;
+            }
+
+            VerticalLayout {
+                spacing: Theme.spacing-xs;
+                padding-right: forget-seed-dialog.close-button-size + Theme.spacing-sm;
+
+                Text {
+                    text: "Forget imported seed?";
+                    color: forget-seed-dialog.title-color;
+                    font-family: forget-seed-dialog.font-family;
+                    font-size: forget-seed-dialog.title-font-size;
+                    font-weight: forget-seed-dialog.title-font-weight;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: "Forget imported seed " + Ui.root-id + "? Your derived keys stay on the device. To derive more keys you will import a seed again.";
+                    color: forget-seed-dialog.message-color;
+                    font-family: forget-seed-dialog.font-family;
+                    font-size: forget-seed-dialog.font-size;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle {
+                height: Theme.border-width-sm;
+                background: forget-seed-dialog.separator-color;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                alignment: end;
+
+                Button {
+                    text: "Cancel";
+                    variant: ButtonVariant.secondary;
+                    size: forget-seed-dialog.size;
+                    touch-expansion: 0px;
+                    clicked => {
+                        Ui.show-forget-seed = false;
+                    }
+                }
+
+                Button {
+                    text: "Forget";
+                    variant: ButtonVariant.danger;
+                    size: forget-seed-dialog.size;
+                    touch-expansion: 0px;
+                    clicked => {
+                        Ui.show-forget-seed = false;
+                        Callbacks.forget-seed();
                     }
                 }
             }
