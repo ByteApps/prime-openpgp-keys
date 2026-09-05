@@ -38,6 +38,10 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// BIP-39 mnemonic + optional passphrase -> the portable, cross-platform
 /// root this app persists (sealed at rest — see `store`, U3).
 pub mod import;
+/// Sealing/opening the imported-seed root at rest (PLAN-openpgp-keys-import.md
+/// §4). Pure functions of the sealing seed — the app layer reads/writes the
+/// AppData file.
+pub mod store;
 
 use pgp::composed::{
     ArmorOptions, DetachedSignature, EncryptionCaps, KeyType, Message, MessageBuilder,
