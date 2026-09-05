@@ -795,17 +795,6 @@ component CreateView inherits VerticalLayout {
                         wrap: word-wrap;
                     }
 
-                    mnemonic-input := TextArea {
-                        label: "Mnemonic (12 or 24 words)";
-                        placeholder: "word1 word2 word3 …";
-                        value <=> Ui.import-mnemonic;
-                        min-rows: 4;
-                        max-rows: 6;
-                        changed(text) => {
-                            Callbacks.import-mnemonic-edited(text);
-                        }
-                    }
-
                     if Ui.import-suggestions.length > 0: HorizontalLayout {
                         height: 40px;
                         spacing: 8px;
@@ -836,11 +825,17 @@ component CreateView inherits VerticalLayout {
                         }
                     }
 
-                    if Ui.import-status != "": Text {
-                        text: Ui.import-status;
-                        color: Theme.palette-muted;
-                        font-family: "Montserrat";
-                        font-size: 13px;
+                    mnemonic-input := TextArea {
+                        // Status rides in the label so it stays visible with the
+                        // on-screen keyboard up (it covers the lower ~40%).
+                        label: Ui.import-status == "" ? "Mnemonic (12 or 24 words)" : "Mnemonic · " + Ui.import-status;
+                        placeholder: "word1 word2 word3 …";
+                        value <=> Ui.import-mnemonic;
+                        min-rows: 4;
+                        max-rows: 6;
+                        changed(text) => {
+                            Callbacks.import-mnemonic-edited(text);
+                        }
                     }
 
                     import-pass-input := PassInput {
