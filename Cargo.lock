@@ -5030,19 +5030,22 @@ version = "0.1.0"
 dependencies = [
  "bip39",
  "chacha20poly1305",
+ "ed25519-dalek",
  "getrandom 0.2.10",
  "hkdf",
  "hmac",
  "k256",
+ "num-bigint",
+ "p521",
  "pbkdf2",
  "pgp",
  "rand 0.8.6",
- "rand_chacha 0.3.1",
  "ripemd",
  "rsa",
  "serde_json",
  "sha2",
  "unicode-normalization",
+ "x25519-dalek",
  "zeroize",
 ]
 

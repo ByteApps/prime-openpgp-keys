@@ -584,8 +584,15 @@ fn sign_detached_armored_roundtrip() {
 /// shipped empty lists until 2026-08-17.
 #[test]
 fn created_keys_advertise_algorithm_preferences() {
-    let key = pgp_core::derive_ed25519(&[0x11u8; 32], 0, "Prefs", "prefs@example.com", None)
-        .expect("derive_ed25519 failed");
+    let key = pgp_core::derive_ed25519(
+        &[0x11u8; 32],
+        &[0xAA, 0xBB, 0xCC, 0xDD],
+        0,
+        "Prefs",
+        "prefs@example.com",
+        None,
+    )
+    .expect("derive_ed25519 failed");
     let sig = key.details.users[0]
         .signatures
         .first()

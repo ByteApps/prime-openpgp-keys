@@ -631,15 +631,17 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let passphrase = if pass.is_empty() { None } else { Some(pass.as_str()) };
                 let result = open_imported_root(&fs)
-                    .and_then(|unsealed| {
+                    .and_then(|(meta, unsealed)| {
                         // Known only inside the encryption — update the UI
                         // header the moment the blob is opened, regardless
                         // of whether the derivation itself later fails.
                         ui.global::<Ui>().set_root_xfp(hex_lower(unsealed.xfp.as_slice()).into());
+                        // root_id rides along as the key's provenance
+                        // notation (which root + index made it).
                         if algo == 1 {
-                            pgp_core::derive_p521(&unsealed.root, index, name.trim(), email.trim(), passphrase)
+                            pgp_core::derive_p521(&unsealed.root, &meta.root_id, index, name.trim(), email.trim(), passphrase)
                         } else {
-                            pgp_core::derive_ed25519(&unsealed.root, index, name.trim(), email.trim(), passphrase)
+                            pgp_core::derive_ed25519(&unsealed.root, &meta.root_id, index, name.trim(), email.trim(), passphrase)
                         }
                         .map_err(|e| e.0)
                     })
@@ -1405,14 +1407,15 @@ fn update_import_status(ui: &AppWindow, raw: &str) {
 /// `app_seed()` (grant-on-first-use — expected here, never at boot), and
 /// unseal it. The root never lives in app `State`; every derive re-reads
 /// and re-opens it.
-fn open_imported_root(fs: &Fs) -> Result<pgp_core::store::UnsealedRoot, String> {
+fn open_imported_root(
+    fs: &Fs,
+) -> Result<(pgp_core::store::RootMeta, pgp_core::store::UnsealedRoot), String> {
     let blob = read_bytes(fs, IMPORTED_KEY_PATH, Location::AppData)
         .map_err(|_| "No imported seed — import one first".to_string())?;
     let app_seed = Security::default()
         .app_seed()
         .map_err(|_| "Device locked or seed unavailable".to_string())?;
-    let (_meta, unsealed) = pgp_core::store::open_root(&app_seed, &blob).map_err(|e| e.0)?;
-    Ok(unsealed)
+    pgp_core::store::open_root(&app_seed, &blob).map_err(|e| e.0)
 }
 
 fn loc_name(loc: Location) -> &'static str {
