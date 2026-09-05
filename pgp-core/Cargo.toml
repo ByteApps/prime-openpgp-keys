@@ -20,6 +20,20 @@ rsa = { version = "0.9", default-features = false }
 hkdf = "0.12"
 sha2 = { version = "0.10", default-features = false }
 rand_chacha = "0.3"
+# Imported-seed root derivation (PLAN-openpgp-keys-import.md §2): plain
+# BIP-39 (PBKDF2-HMAC-SHA512), NFKD normalization of mnemonic/passphrase,
+# and zeroizing the intermediates. Pure Rust, no C deps, so it keeps
+# cross-compiling like the rest of this crate.
+pbkdf2 = "0.12"
+unicode-normalization = "0.1"
+zeroize = { version = "1", features = ["derive"] }
+# BIP-32 master-key fingerprint (xfp) of the imported seed, so the UI can
+# show the same fingerprint a hardware wallet shows for the same seed +
+# passphrase. Same versions/features as graffito/notes-core's bip32.rs —
+# pure Rust, no secp256k1-sys.
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+hmac = { version = "0.12", default-features = false }
+ripemd = "0.1"
 
 [dev-dependencies]
 # Entropy tests (tests/entropy.rs, tests/rng_backend.rs) exercise the two
@@ -31,3 +45,7 @@ rand = "0.8"
 # Parses `cargo metadata --format-version 1` JSON for the dependency-graph
 # guard in tests/rng_backend.rs. Same major already resolved in Cargo.lock.
 serde_json = "1"
+# Independent BIP-39 implementation used ONLY as a cross-check in
+# tests/import.rs (mnemonic -> seed for random mnemonics); never used by
+# the derivation itself. Same crate/version graffito/app-core uses.
+bip39 = "2"

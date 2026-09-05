@@ -34,6 +34,11 @@
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// Imported-seed root derivation (PLAN-openpgp-keys-import.md §2):
+/// BIP-39 mnemonic + optional passphrase -> the portable, cross-platform
+/// root this app persists (sealed at rest — see `store`, U3).
+pub mod import;
+
 use pgp::composed::{
     ArmorOptions, DetachedSignature, EncryptionCaps, KeyType, Message, MessageBuilder,
     PublicOrSecret, SecretKeyParamsBuilder, SubkeyParamsBuilder,

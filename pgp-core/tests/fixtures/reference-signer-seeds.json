@@ -1,0 +1,30 @@
+[
+  {
+    "name": "sim24-nopass",
+    "seed64_hex": "9ade7e75ca189ffdb33564c6d7d89dfef878d0495b24743f2450a98d592fe4f48300a3fa9eefb5ccc15c17546dcd33ee0fd2e62980969c2601f8d115c3cf7ff4",
+    "xfp_hex": "0f056943",
+    "words": "wife shiver author away frog air rough vanish fantasy frozen noodle athlete pioneer citizen symptom firm much faith extend rare axis garment kiwi clarify",
+    "passphrase": ""
+  },
+  {
+    "name": "sim24-pass",
+    "seed64_hex": "14d5644fbb72351a7b362db40e072a7507e7267b622ed373909ae273a2a6bb54895b7532fbcac0da6a107191631a5d72e6891cf91a4380510c5b08a942e4e3f3",
+    "xfp_hex": "86ff505a",
+    "words": "wife shiver author away frog air rough vanish fantasy frozen noodle athlete pioneer citizen symptom firm much faith extend rare axis garment kiwi clarify",
+    "passphrase": "test"
+  },
+  {
+    "name": "spec12-trezor",
+    "seed64_hex": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+    "xfp_hex": "b4e3f5ed",
+    "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    "passphrase": "TREZOR"
+  },
+  {
+    "name": "spec12b-spaces",
+    "seed64_hex": "cc10764ff83ff778a22097780b251ddf2719ee83f14126a621ea3cf0dfcec455dddcf56d280024f692757de2983cf3b120596a3285c712d942aa012c7924e444",
+    "xfp_hex": "79d4690a",
+    "words": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    "passphrase": "correct horse battery staple"
+  }
+]
