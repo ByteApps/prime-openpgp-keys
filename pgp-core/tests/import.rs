@@ -355,3 +355,26 @@ fn suggest_short_prefix_returns_max_entries() {
     assert_eq!(got.len(), 3);
     assert!(got.iter().all(|w| w.starts_with("ab")));
 }
+
+/// End-to-end golden vector, pinned from an independent run of the whole
+/// pipeline on the device build (hosted simulator, 2026-09-04): the BIP-39
+/// spec phrase with NO passphrase → root → Ed25519 key #0. The root id and
+/// the master fingerprint were cross-checked against a from-scratch Python
+/// HKDF/BIP-32 computation; the OpenPGP fingerprint is what the app logged.
+/// A future desktop/mobile OpenPGP Keys build must reproduce all three.
+#[test]
+fn golden_spec_phrase_no_passphrase_to_ed25519_key_0() {
+    let r = pgp_core::import::derive_root(
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        "",
+    )
+    .unwrap();
+    assert_eq!(r.root_id_hex(), "E6C8985D");
+    assert_eq!(r.xfp_hex(), "73c5da0a");
+    let key = pgp_core::derive_ed25519(&r.root, &r.root_id, 0, "Seed Test", "seed-test@example.com", None)
+        .unwrap();
+    let info = pgp_core::key_info(&pgp_core::PgpKey::Secret(key));
+    assert_eq!(info.fingerprint, "D3BD8DFD5394E96799AB797F3D32DE84718941B9");
+    let p = info.provenance.expect("derived key carries provenance");
+    assert_eq!((p.root_id, p.index), (r.root_id, 0));
+}
