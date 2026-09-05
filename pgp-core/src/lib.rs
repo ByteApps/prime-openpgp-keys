@@ -45,7 +45,7 @@ use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use pgp::crypto::{ecdh, ecdsa, ed25519, eddsa_legacy};
 use pgp::packet::{
-    Features, KeyFlags, PacketTrait, PubKeyInner, PublicKey, PublicSubkey, SecretKey,
+    Features, KeyFlags, Notation, PacketTrait, PubKeyInner, PublicKey, PublicSubkey, SecretKey,
     SecretSubkey, Signature, SignatureConfig, SignatureType, Subpacket, SubpacketData, UserId,
 };
 use pgp::ser::Serialize as _;
@@ -120,6 +120,11 @@ pub struct KeyInfo {
     pub user_ids: Vec<String>,
     pub subkeys: Vec<SubkeyInfo>,
     pub has_secret: bool,
+    /// Parsed `derived@byteapps.com` notation from the latest primary
+    /// self-certification, if present (PLAN-openpgp-keys-import.md §6).
+    /// `None` for random keys, foreign keys, and keys with a malformed or
+    /// absent notation.
+    pub provenance: Option<Provenance>,
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +371,8 @@ pub fn key_info(key: &PgpKey) -> KeyInfo {
         }
     }
 
+    let provenance = latest_self_cert(users, &fpr, &key_id).and_then(provenance_from_cert);
+
     KeyInfo {
         fingerprint: format!("{fpr:X}"),
         key_id: format!("{key_id}").to_uppercase(),
@@ -376,7 +383,168 @@ pub fn key_info(key: &PgpKey) -> KeyInfo {
         user_ids,
         subkeys,
         has_secret: key.has_secret(),
+        provenance,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Provenance (PLAN-openpgp-keys-import.md §6)
+//
+// A derived key's primary self-certification carries a `derived@byteapps.com`
+// notation recording which imported-seed root and index produced it, so any
+// importer — including a future desktop/mobile app — can tell where a
+// derived key came from without guesswork. The notation lives in the HASHED
+// subpackets (it is bound by the signature) but is otherwise inert: it never
+// touches the public key packet, so it cannot move a fingerprint.
+// ---------------------------------------------------------------------------
+
+/// Notation name used to mark a derived key's primary self-certification.
+const PROVENANCE_NOTATION_NAME: &str = "derived@byteapps.com";
+
+/// Which HKDF stream (`ed25519/...` vs `p521/...`) produced a derived key —
+/// the `alg` field of the provenance notation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedAlg {
+    Ed25519,
+    P521,
+}
+
+impl DerivedAlg {
+    fn as_str(self) -> &'static str {
+        match self {
+            DerivedAlg::Ed25519 => "ed25519",
+            DerivedAlg::P521 => "p521",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ed25519" => Some(DerivedAlg::Ed25519),
+            "p521" => Some(DerivedAlg::P521),
+            _ => None,
+        }
+    }
+}
+
+/// Parsed `derived@byteapps.com` notation: which imported-seed root and
+/// index produced a derived key. See [`provenance`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Provenance {
+    /// Notation format version. Always `1` today — [`provenance`] returns
+    /// `None` for any other value rather than guessing at its shape.
+    pub version: u8,
+    pub root_id: [u8; 4],
+    pub index: u32,
+    pub alg: DerivedAlg,
+}
+
+/// Render the notation value string: `v1;root=<8 upper-hex>;idx=<index>;alg=<alg>`.
+fn provenance_notation_value(root_id: &[u8; 4], index: u32, alg: DerivedAlg) -> String {
+    format!(
+        "v1;root={:02X}{:02X}{:02X}{:02X};idx={index};alg={}",
+        root_id[0],
+        root_id[1],
+        root_id[2],
+        root_id[3],
+        alg.as_str()
+    )
+}
+
+/// Build the hashed `derived@byteapps.com` notation subpacket for a freshly
+/// derived key's primary self-certification.
+fn provenance_notation_subpacket(
+    root_id: &[u8; 4],
+    index: u32,
+    alg: DerivedAlg,
+) -> Result<Subpacket, PgpError> {
+    Ok(Subpacket::regular(SubpacketData::Notation(Notation {
+        readable: true,
+        name: PROVENANCE_NOTATION_NAME.into(),
+        value: provenance_notation_value(root_id, index, alg).into(),
+    }))?)
+}
+
+/// Parse a notation value string (`v1;root=...;idx=...;alg=...`) into a
+/// [`Provenance`]. Any deviation from the exact expected shape — wrong
+/// version, non-hex/wrong-length root, unparseable index, unknown algorithm,
+/// a missing or duplicated field, or extra junk — returns `None` rather than
+/// guessing. Never panics on untrusted input.
+fn parse_provenance_value(value: &str) -> Option<Provenance> {
+    let mut root_id: Option<[u8; 4]> = None;
+    let mut index: Option<u32> = None;
+    let mut alg: Option<DerivedAlg> = None;
+
+    let mut fields = value.split(';');
+    if fields.next()? != "v1" {
+        return None;
+    }
+    for field in fields {
+        let (key, val) = field.split_once('=')?;
+        match key {
+            "root" => {
+                if root_id.is_some() || val.len() != 8 {
+                    return None;
+                }
+                let mut bytes = [0u8; 4];
+                for (i, b) in bytes.iter_mut().enumerate() {
+                    *b = u8::from_str_radix(val.get(i * 2..i * 2 + 2)?, 16).ok()?;
+                }
+                root_id = Some(bytes);
+            }
+            "idx" => {
+                if index.is_some() {
+                    return None;
+                }
+                index = Some(val.parse().ok()?);
+            }
+            "alg" => {
+                if alg.is_some() {
+                    return None;
+                }
+                alg = Some(DerivedAlg::parse(val)?);
+            }
+            _ => return None,
+        }
+    }
+
+    Some(Provenance {
+        version: 1,
+        root_id: root_id?,
+        index: index?,
+        alg: alg?,
+    })
+}
+
+/// Extract and parse the `derived@byteapps.com` notation from one
+/// self-certification, if present and well-formed.
+fn provenance_from_cert(sig: &Signature) -> Option<Provenance> {
+    let notation = sig
+        .notations()
+        .into_iter()
+        .find(|n| n.name.as_ref() == PROVENANCE_NOTATION_NAME.as_bytes())?;
+    let value = std::str::from_utf8(notation.value.as_ref()).ok()?;
+    parse_provenance_value(value)
+}
+
+/// Which imported-seed root and index produced this key, if it was
+/// deterministically derived and its notation is intact. `None` for random
+/// keys ([`generate_ed25519`] etc.), foreign/imported keys, and any key
+/// whose notation value doesn't parse.
+pub fn provenance(key: &PgpKey) -> Option<Provenance> {
+    let (fpr, key_id, users) = match key {
+        PgpKey::Public(pk) => (
+            pk.primary_key.fingerprint(),
+            pk.primary_key.legacy_key_id(),
+            &pk.details.users,
+        ),
+        PgpKey::Secret(sk) => (
+            sk.primary_key.fingerprint(),
+            sk.primary_key.legacy_key_id(),
+            &sk.details.users,
+        ),
+    };
+    let sig = latest_self_cert(users, &fpr, &key_id)?;
+    provenance_from_cert(sig)
 }
 
 // ---------------------------------------------------------------------------
@@ -799,13 +967,18 @@ fn p521_secret_key(raw: [u8; 80]) -> Result<p521::SecretKey, PgpError> {
 // existing `resign_user_id` below already uses for post-hoc re-signing.
 
 /// Self-certify the primary user ID: certify+sign key flags, the algorithm
-/// preferences every key this crate makes advertises, and a fixed creation
-/// time so re-deriving the same root+index reproduces this signature byte
-/// for byte (ECDSA/EdDSA signing here is otherwise deterministic already).
+/// preferences every key this crate makes advertises, a fixed creation time
+/// so re-deriving the same root+index reproduces this signature byte for
+/// byte (ECDSA/EdDSA signing here is otherwise deterministic already), and
+/// the `derived@byteapps.com` provenance notation (PLAN-openpgp-keys-import.md
+/// §6) recording the root/index/algorithm that produced this key.
 fn sign_primary_self_cert(
     primary: &SecretKey,
     uid: &UserId,
     created: Timestamp,
+    root_id: &[u8; 4],
+    index: u32,
+    alg: DerivedAlg,
 ) -> Result<Signature, PgpError> {
     let mut rng = thread_rng();
     let mut config = SignatureConfig::from_key(&mut rng, primary, SignatureType::CertPositive)?;
@@ -831,6 +1004,7 @@ fn sign_primary_self_cert(
             preferred_compression_algorithms().into(),
         ))?,
         Subpacket::regular(SubpacketData::IsPrimary(true))?,
+        provenance_notation_subpacket(root_id, index, alg)?,
     ];
     config.unhashed_subpackets = vec![Subpacket::regular(SubpacketData::IssuerKeyId(
         primary.legacy_key_id(),
@@ -889,6 +1063,9 @@ fn assemble_derived_key(
     sub_secret_params: PlainSecretParams,
     name: &str,
     email: &str,
+    root_id: &[u8; 4],
+    index: u32,
+    alg: DerivedAlg,
 ) -> Result<SignedSecretKey, PgpError> {
     let created = Timestamp::from_secs(DERIVED_KEY_CREATED_AT);
 
@@ -904,7 +1081,7 @@ fn assemble_derived_key(
     let uid = UserId::from_str(Default::default(), format!("{name} <{email}>"))
         .map_err(|e| PgpError(format!("Invalid user ID: {e}")))?;
 
-    let cert_sig = sign_primary_self_cert(&primary_sec_key, &uid, created)?;
+    let cert_sig = sign_primary_self_cert(&primary_sec_key, &uid, created, root_id, index, alg)?;
     let subkey_sig = sign_subkey_binding(&primary_sec_key, &sub_pub_key, created)?;
     let sub_sec_key = SecretSubkey::new(sub_pub_key, SecretParams::Plain(sub_secret_params))?;
 
@@ -966,6 +1143,7 @@ fn apply_passphrase(
 /// from the S2K salt when a passphrase is set.
 pub fn derive_ed25519(
     root: &[u8; 32],
+    root_id: &[u8; 4],
     index: u32,
     name: &str,
     email: &str,
@@ -1009,6 +1187,9 @@ pub fn derive_ed25519(
         sub_secret_params,
         name,
         email,
+        root_id,
+        index,
+        DerivedAlg::Ed25519,
     )?;
     apply_passphrase(key, passphrase)
 }
@@ -1028,6 +1209,7 @@ pub fn derive_ed25519(
 /// accidental drift.
 pub fn derive_p521(
     root: &[u8; 32],
+    root_id: &[u8; 4],
     index: u32,
     name: &str,
     email: &str,
@@ -1062,6 +1244,9 @@ pub fn derive_p521(
         sub_secret_params,
         name,
         email,
+        root_id,
+        index,
+        DerivedAlg::P521,
     )?;
     apply_passphrase(key, passphrase)
 }
@@ -1324,6 +1509,15 @@ fn resign_user_id(
             hashed.push(Subpacket::regular(
                 SubpacketData::PreferredCompressionAlgorithms(comp.iter().copied().collect()),
             )?);
+        }
+        // Carry over any notations (in practice: the `derived@byteapps.com`
+        // provenance notation on a derived key) so re-signing paths — expiry
+        // changes, adding a user ID — never silently drop it. See
+        // PLAN-openpgp-keys-import.md §6.
+        for notation in t.notations() {
+            hashed.push(Subpacket::regular(SubpacketData::Notation(
+                notation.clone(),
+            ))?);
         }
     } else {
         // No prior self-sig to copy from: certify+sign primary flags.

@@ -203,7 +203,7 @@ fn control_fixed_seed_passes_and_that_is_the_point() {
 // ---------------------------------------------------------------------
 
 fn fingerprint_of(root: &[u8; 32], index: u32) -> String {
-    let key = pgp_core::derive_ed25519(root, index, "Test User", "test@example.com", None)
+    let key = pgp_core::derive_ed25519(root, &[0xAA, 0xBB, 0xCC, 0xDD], index, "Test User", "test@example.com", None)
         .expect("derive_ed25519 failed");
     let info = pgp_core::key_info(&pgp_core::PgpKey::Secret(key));
     info.fingerprint
@@ -303,7 +303,7 @@ fn derive_functions_never_use_a_seeded_rng() {
 /// move this value.
 #[test]
 fn derive_p521_fingerprint_is_pinned() {
-    let key = pgp_core::derive_p521(&[0x11u8; 32], 0, "Test User", "test@example.com", None)
+    let key = pgp_core::derive_p521(&[0x11u8; 32], &[0xAA, 0xBB, 0xCC, 0xDD], 0, "Test User", "test@example.com", None)
         .expect("derive_p521 failed");
     let info = pgp_core::key_info(&pgp_core::PgpKey::Secret(key));
     assert_eq!(
