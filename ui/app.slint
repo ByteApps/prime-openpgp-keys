@@ -660,6 +660,15 @@ component CreateView inherits VerticalLayout {
     // and `reveal` scrolls the focused block to its top. On blur it grows
     // back and the viewport re-clamps.
     property <bool> kb-up: false;
+    // The latch is set on focus and cleared on blur — but switching Key
+    // type, or importing a seed, DESTROYS the focused field (its section is
+    // an `if`), so no blur ever fires and the form stayed shrunk to the
+    // keyboard height after the keyboard was gone (Sal, device, 2026-09-06).
+    // Any section swap therefore drops the latch.
+    property <int> kb-mode-watch: Ui.create-mode;
+    changed kb-mode-watch => { root.kb-up = false; }
+    property <bool> kb-root-watch: Ui.has-imported-root;
+    changed kb-root-watch => { root.kb-up = false; }
     create-flick := Flickable {
         vertical-stretch: 1;
         // A constant, deliberately: `self.y`/`root.height` are layout-derived
