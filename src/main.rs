@@ -1,7 +1,7 @@
 mod theme;
 
 use std::cell::RefCell;
-use std::io::Read;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +23,23 @@ const KEYS_DIR: &str = "/pgp-keys";
 /// `Location::User`, where `.asc` keys live and survive uninstall).
 /// PLAN-openpgp-keys-import.md §4.
 const IMPORTED_KEY_PATH: &str = "/imported_key";
+
+/// Reject anything bigger than this on the key-import browse path: it's the
+/// one `read_bytes` call fed by an arbitrary user-picked file (as opposed to
+/// our own small AppData blobs), and `read_to_end` on a huge file is an
+/// uncatchable OOM abort on device. A real armored key is kilobytes.
+const MAX_IMPORT_SIZE: u64 = 4 * 1024 * 1024;
+
+/// Hard ceiling on decrypted-plaintext size for `decrypt_stream`. Streaming
+/// decrypt/decompress means a small crafted `.gpg` (a decompression bomb,
+/// encrypted to the user's own public key — anyone can build one) could
+/// otherwise stream unbounded plaintext and fill device storage. There is
+/// no free-space query for a `Location` in the fs API — checked
+/// `fs::FileSystem::block_count` (total blocks, not free ones) and the rest
+/// of `keyos-sdk/lib/keyos/api/fs/src/lib.rs`, nothing else reports free
+/// space — so this is a generous placeholder cap pending a real free-space
+/// check, not a considered budget.
+const MAX_DECRYPT_OUTPUT: u64 = 2 * 1024 * 1024 * 1024;
 
 type Fs = fs::FileSystem<fs_permissions::FileSystemPermissions>;
 
@@ -413,6 +430,18 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 return;
             }
 
+            // A user can point the import browser at any file, including a
+            // huge one — read_to_end on that would abort the process (no
+            // heap left). Our own armored keys are kilobytes, so 4 MiB is
+            // generous. If metadata itself fails, fall through to
+            // read_bytes below and let its existing error path handle it.
+            if let Ok(meta) = fs.metadata(&full, loc) {
+                if meta.size > MAX_IMPORT_SIZE {
+                    log::info!("cb: import-key {name} err=too-large");
+                    show_error(&ui, "File too large to import as a key".to_string());
+                    return;
+                }
+            }
             let data = match read_bytes(&fs, &full, loc) {
                 Ok(d) => d,
                 Err(e) => {
@@ -1061,9 +1090,17 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     Location::Usb => "usb",
                     _ => "internal",
                 };
-                let result = read_bytes(&fs, &path, loc)
-                    .and_then(|data| {
-                        with_secret_key(&state, |sk| pgp_core::sign_detached(sk, &pass, &data))
+                let result = fs
+                    .open_file(&path, loc, OpenFlags::READ_ONLY)
+                    .map_err(|e| err_msg(&e))
+                    .and_then(|f| {
+                        // Capacity matched to fs::FILE_BUFFER_SIZE, the max
+                        // per-call fs IPC transfer size — a default 8 KiB
+                        // BufReader would split every fill into 4 round trips.
+                        let reader = BufReader::with_capacity(fs::FILE_BUFFER_SIZE, f);
+                        with_secret_key(&state, |sk| {
+                            pgp_core::sign_detached_stream(sk, &pass, reader)
+                        })
                     })
                     .and_then(|sig| {
                         fs.open_file(sig_path.as_str(), loc, OpenFlags::CREATE)
@@ -1112,29 +1149,52 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let name = path.rsplit('/').next().unwrap_or(&path).to_string();
                 let out_path = format!("{path}.gpg");
+                // Written IN PLACE. See `open_output` for why there is no
+                // scratch-then-rename here.
                 let loc_name = loc_name(loc);
-                let result = read_bytes(&fs, &path, loc)
-                    .and_then(|data| {
-                        let s = state.borrow();
-                        let cur = s.current.as_ref().ok_or("No key open")?;
-                        let sign_with = if sign {
-                            match &cur.key {
-                                PgpKey::Secret(sk) => Some((sk, pass.as_str())),
-                                PgpKey::Public(_) => {
-                                    return Err("Cannot sign: no secret key".to_string())
-                                }
+
+                let stream_result: Result<(), String> = (|| {
+                    let src = fs
+                        .open_file(&path, loc, OpenFlags::READ_ONLY)
+                        .map_err(|e| err_msg(&e))?;
+                    // Capacity matched to fs::FILE_BUFFER_SIZE (the max
+                    // per-call fs IPC transfer size) on both ends.
+                    let reader = BufReader::with_capacity(fs::FILE_BUFFER_SIZE, src);
+
+                    let mut dst = open_output(&fs, &out_path, loc)?;
+                    let mut writer = BufWriter::with_capacity(fs::FILE_BUFFER_SIZE, dst);
+
+                    let s = state.borrow();
+                    let cur = s.current.as_ref().ok_or_else(|| "No key open".to_string())?;
+                    let sign_with = if sign {
+                        match &cur.key {
+                            PgpKey::Secret(sk) => Some((sk, pass.as_str())),
+                            PgpKey::Public(_) => {
+                                return Err("Cannot sign: no secret key".to_string())
                             }
-                        } else {
-                            None
-                        };
-                        pgp_core::encrypt_bytes(&cur.key, &name, data, sign_with)
-                            .map_err(|e| e.0)
-                    })
-                    .and_then(|cipher| {
-                        fs.open_file(out_path.as_str(), loc, OpenFlags::CREATE)
-                            .and_then(|mut f| f.overwrite(&cipher))
-                            .map_err(|e| err_msg(&e))
-                    });
+                        }
+                    } else {
+                        None
+                    };
+                    pgp_core::encrypt_stream(&cur.key, &name, reader, &mut writer, sign_with)
+                        .map_err(|e| e.0)?;
+                    drop(s);
+
+                    // BufWriter's Drop flushes but swallows the error —
+                    // flush explicitly so a failure on the last partial
+                    // buffer (e.g. disk full) is caught here instead of
+                    // silently renaming a truncated file over the
+                    // destination.
+                    writer.flush().map_err(|_| "Write failed".to_string())?;
+                    Ok(())
+                })();
+
+                let result = stream_result;
+                if result.is_err() {
+                    // Leave no partial/unverified output behind, but do NOT
+                    // remove the file — see `open_output`.
+                    let _ = truncate_output(&fs, &out_path, loc);
+                }
                 ui.global::<Ui>().set_busy(false);
                 match result {
                     Ok(()) => {
@@ -1175,16 +1235,50 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let name = path.rsplit('/').next().unwrap_or(&path).to_string();
                 let out_path = strip_pgp_ext(&path);
+                // Written IN PLACE, and on failure truncated back to
+                // empty — see `open_output`. rpgp's SEIPDv1 streaming reader
+                // releases plaintext BEFORE the end-of-stream MDC check, so a
+                // tampered ciphertext can put unverified bytes on disk; the
+                // truncate-on-error below is what stops them being left there
+                // to be mistaken for a good decrypt.
                 let loc_name = loc_name(loc);
-                let result = read_bytes(&fs, &path, loc)
-                    .and_then(|data| {
-                        with_secret_key(&state, |sk| pgp_core::decrypt_bytes(sk, &pass, data))
-                    })
-                    .and_then(|plain| {
-                        fs.open_file(out_path.as_str(), loc, OpenFlags::CREATE)
-                            .and_then(|mut f| f.overwrite(&plain))
-                            .map_err(|e| err_msg(&e))
-                    });
+
+                let stream_result: Result<(), String> = (|| {
+                    let src = fs
+                        .open_file(&path, loc, OpenFlags::READ_ONLY)
+                        .map_err(|e| err_msg(&e))?;
+                    // Capacity matched to fs::FILE_BUFFER_SIZE (the max
+                    // per-call fs IPC transfer size) on both ends.
+                    let reader = BufReader::with_capacity(fs::FILE_BUFFER_SIZE, src);
+
+                    let mut dst = open_output(&fs, &out_path, loc)?;
+                    let mut writer = BufWriter::with_capacity(fs::FILE_BUFFER_SIZE, dst);
+
+                    with_secret_key(&state, |sk| {
+                        pgp_core::decrypt_stream(
+                            sk,
+                            &pass,
+                            reader,
+                            &mut writer,
+                            MAX_DECRYPT_OUTPUT,
+                        )
+                    })?;
+
+                    // BufWriter's Drop flushes but swallows the error —
+                    // flush explicitly so a failure on the last partial
+                    // buffer (e.g. disk full) is caught here instead of
+                    // silently renaming a truncated file over the
+                    // destination.
+                    writer.flush().map_err(|_| "Write failed".to_string())?;
+                    Ok(())
+                })();
+
+                let result = stream_result;
+                if result.is_err() {
+                    // Leave no partial/unverified output behind, but do NOT
+                    // remove the file — see `open_output`.
+                    let _ = truncate_output(&fs, &out_path, loc);
+                }
                 ui.global::<Ui>().set_busy(false);
                 match result {
                     Ok(()) => {
@@ -1434,6 +1528,45 @@ fn loc_name(loc: Location) -> &'static str {
         Location::Usb => "usb",
         _ => "internal",
     }
+}
+
+/// Open an encrypt/decrypt destination for streaming, truncated to empty.
+///
+/// WHY THERE IS NO SCRATCH-THEN-RENAME HERE (Sal, 2026-09-08): on this
+/// KeyOS build the storage layer misbehaves when a name is reused after the
+/// file holding it was deleted, so "write `<out>.part`, delete `<out>`,
+/// rename the scratch onto `<out>`" is exactly the pattern to avoid. It also
+/// cannot work as-is: KeyOS's `rename` refuses an existing destination and
+/// reports it as a generic `Io` error, which is how a first attempt at this
+/// silently broke re-encrypting a file whose `.gpg` already existed.
+///
+/// So the output is written IN PLACE, which is also what the app did before
+/// streaming (`File::overwrite` = seek(0) + write_all + truncate) — the
+/// destination's old contents are gone the moment the operation starts,
+/// exactly as before. `OpenFlags::CREATE` does not truncate, so truncate
+/// explicitly or a shorter new output would keep the old tail.
+fn open_output(
+    fs: &Fs,
+    path: &str,
+    loc: Location,
+) -> Result<fs::File<fs_permissions::FileSystemPermissions>, String> {
+    let mut f = fs
+        .open_file(path, loc, OpenFlags::CREATE)
+        .map_err(|e| err_msg(&e))?;
+    f.truncate().map_err(|e| err_msg(&e))?;
+    Ok(f)
+}
+
+/// Empty a failed operation's output. Truncating rather than removing is
+/// deliberate: the very next thing a retry does is write this same name
+/// again, and re-creating a just-deleted name is the storage pattern we must
+/// not use (see `open_output`). An empty file is also unambiguous — it can
+/// never be mistaken for a good decrypt.
+fn truncate_output(fs: &Fs, path: &str, loc: Location) -> Result<(), String> {
+    let mut f = fs
+        .open_file(path, loc, OpenFlags::CREATE)
+        .map_err(|e| err_msg(&e))?;
+    f.truncate().map_err(|e| err_msg(&e))
 }
 
 /// Output path for a decrypted file: strip a trailing .gpg/.pgp/.asc,
