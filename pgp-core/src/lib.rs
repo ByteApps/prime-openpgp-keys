@@ -1285,23 +1285,52 @@ pub fn change_passphrase(
 /// flag (all keys this app generates do), otherwise with the newest
 /// signing-capable secret subkey. Primary and subkeys share one passphrase
 /// everywhere in this app, so a single `pass` covers either signer.
+///
+/// Thin wrapper over [`sign_detached_stream`] — see that function for the
+/// constant-memory streaming path.
 pub fn sign_detached(
     key: &SignedSecretKey,
     pass: &str,
     data: &[u8],
 ) -> Result<Vec<u8>, PgpError> {
-    Ok(make_detached_signature(key, pass, data)?.to_bytes()?)
+    sign_detached_stream(key, pass, data)
 }
 
 /// Detached ASCII-armored OpenPGP signature over `data` — the same shape
 /// `gpg --detach-sign --armor` writes to a `.asc` file. Text form, so it
 /// survives QR codes, e-mail, and copy/paste.
+///
+/// Thin wrapper over [`sign_detached_armored_stream`] — see that function
+/// for the constant-memory streaming path.
 pub fn sign_detached_armored(
     key: &SignedSecretKey,
     pass: &str,
     data: &[u8],
 ) -> Result<String, PgpError> {
-    Ok(make_detached_signature(key, pass, data)?.to_armored_string(ArmorOptions::default())?)
+    sign_detached_armored_stream(key, pass, data)
+}
+
+/// Streaming detached signature over everything `src` yields — raw
+/// signature-packet bytes, the same shape `gpg --detach-sign` writes.
+/// Constant memory: the hasher is fed as `src` is read, no buffering of the
+/// signed data.
+pub fn sign_detached_stream<R: std::io::Read>(
+    key: &SignedSecretKey,
+    pass: &str,
+    src: R,
+) -> Result<Vec<u8>, PgpError> {
+    Ok(make_detached_signature(key, pass, src)?.to_bytes()?)
+}
+
+/// Streaming, ASCII-armored detached signature over everything `src`
+/// yields — the same shape `gpg --detach-sign --armor` writes. Constant
+/// memory, same as [`sign_detached_stream`].
+pub fn sign_detached_armored_stream<R: std::io::Read>(
+    key: &SignedSecretKey,
+    pass: &str,
+    src: R,
+) -> Result<String, PgpError> {
+    Ok(make_detached_signature(key, pass, src)?.to_armored_string(ArmorOptions::default())?)
 }
 
 /// Pick the signing component key — the primary when its newest self-cert
@@ -1338,10 +1367,10 @@ fn select_signer<'a>(
     }
 }
 
-fn make_detached_signature(
+fn make_detached_signature<R: std::io::Read>(
     key: &SignedSecretKey,
     pass: &str,
-    data: &[u8],
+    data: R,
 ) -> Result<DetachedSignature, PgpError> {
     let pw = to_password(pass);
     let signer = select_signer(key, &pw)?;
@@ -1352,6 +1381,15 @@ fn make_detached_signature(
 // ---------------------------------------------------------------------------
 // Encryption / decryption
 // ---------------------------------------------------------------------------
+//
+// `encrypt_bytes`/`decrypt_bytes` are thin `Cursor`/`Vec` wrappers over
+// `encrypt_stream`/`decrypt_stream` — there is exactly ONE code path here,
+// never a parallel byte-oriented implementation. See `encrypt_stream` and
+// `decrypt_stream` below for why streaming is load-bearing: a KeyOS process
+// has ~59-60 MB of free heap, and the old byte-oriented path buffered a
+// decrypted/encrypted file THREE times over (caller's Vec, rpgp's internal
+// CheckFirst buffer, and `as_data_vec`/`to_vec`'s own copy) — a 60 MB file
+// alone would blow the budget before anything else ran.
 
 /// Encrypt `data` to `recipient`'s encryption subkey as a binary OpenPGP
 /// message (AES-256, SEIPDv1, uncompressed) — what `gpg -e` produces and
@@ -1359,12 +1397,39 @@ fn make_detached_signature(
 ///
 /// `sign_with: Some((key, pass))` additionally signs inside the encrypted
 /// container (one-pass signature, like `gpg -se`).
+///
+/// Thin wrapper over [`encrypt_stream`] — see that function for the
+/// constant-memory streaming path.
 pub fn encrypt_bytes(
     recipient: &PgpKey,
     file_name: &str,
     data: Vec<u8>,
     sign_with: Option<(&SignedSecretKey, &str)>,
 ) -> Result<Vec<u8>, PgpError> {
+    let mut out = Vec::new();
+    encrypt_stream(recipient, file_name, Cursor::new(data), &mut out, sign_with)?;
+    Ok(out)
+}
+
+/// Streaming encrypt. Reads plaintext from `src`, writes the binary OpenPGP
+/// message to `dst` — AES-256, SEIPDv1, ZLIB-compressed, matching
+/// `encrypt_bytes`'s wire format exactly (it is the same code path).
+///
+/// Constant memory: `src` never has a known length here (unlike the
+/// `Vec`-sourced `encrypt_bytes` path), so rpgp emits partial-length
+/// packets at every nested layer (literal / compress / sign / encrypt)
+/// instead of buffering the whole message to compute one fixed length.
+///
+/// `sign_with: Some((key, pass))` additionally signs inside the encrypted
+/// container (one-pass signature, like `gpg -se`) — the signature hash is
+/// updated incrementally as `src` is read, never buffered either.
+pub fn encrypt_stream<R: std::io::Read, W: std::io::Write>(
+    recipient: &PgpKey,
+    file_name: &str,
+    src: R,
+    dst: W,
+    sign_with: Option<(&SignedSecretKey, &str)>,
+) -> Result<(), PgpError> {
     let owned_pk;
     let pk: &SignedPublicKey = match recipient {
         PgpKey::Public(p) => p,
@@ -1383,8 +1448,17 @@ pub fn encrypt_bytes(
         .ok_or_else(|| PgpError("Key has no encryption subkey".into()))?;
 
     let mut rng = thread_rng();
-    let mut builder = MessageBuilder::from_bytes(file_name.to_string(), data)
+    let mut builder = MessageBuilder::from_reader(file_name.to_string(), src)
         .seipd_v1(&mut rng, SymmetricKeyAlgorithm::AES256);
+    // rpgp's default partial-packet chunk size is 512 KiB, and that buffer
+    // is allocated independently at EACH nested generator level a streamed
+    // message passes through (literal, then compress, then sign, then
+    // encrypt) — up to ~2 MiB of scratch for a signed+compressed+encrypted
+    // message at the default. 64 KiB is a power of two (rpgp requires that,
+    // and a minimum of 512 bytes) that keeps the per-level cost small
+    // without materializing the file, which is the entire point of this
+    // path — the default was tuned for throughput, not for a 60 MB heap.
+    builder.partial_chunk_size(64 * 1024)?;
     // Compress before encrypting (ZLIB/DEFLATE), matching gpg's default —
     // smaller output, and our decrypt already handles compressed messages.
     builder.compression(CompressionAlgorithm::ZLIB);
@@ -1395,23 +1469,121 @@ pub fn encrypt_bytes(
         let hash = signer.hash_alg();
         builder.sign(*signer, pw, hash);
     }
-    Ok(builder.to_vec(&mut rng)?)
+    builder.to_writer(&mut rng, dst)?;
+    Ok(())
+}
+
+/// `decrypt_bytes` returns a `Vec<u8>` into a KeyOS process's ~59-60 MB
+/// free heap alongside whatever else is live (the caller's ciphertext
+/// buffer included), so its internal output cap needs real headroom under
+/// that, not just under `u64::MAX`. 32 MiB is comfortably inside the
+/// budget for the small/medium files this byte-oriented entry point is for
+/// — anything that could plausibly approach it should go through
+/// `decrypt_stream` directly (which the device file-decrypt path does),
+/// where the cap is the caller's to choose.
+const DECRYPT_BYTES_MAX_OUTPUT: u64 = 32 * 1024 * 1024;
+
+/// Prefix of the [`PgpError`] message `decrypt_stream` returns when the
+/// plaintext would exceed the caller's `max_output` cap. Fixed and public
+/// so a caller can distinguish "output too large" from other decrypt
+/// failures (e.g. to show a dedicated "refusing to continue" message)
+/// without string-matching the dynamic byte count too.
+pub const OUTPUT_LIMIT_EXCEEDED: &str = "Decrypted output exceeded";
+
+/// A `Write` that counts bytes written and errors once the running total
+/// would exceed `limit`, instead of checking anything up front — the count
+/// is maintained on the way out, so it costs O(1) memory regardless of
+/// `limit`'s size and never reads more of the plaintext than the caller's
+/// sink actually receives.
+struct CappedWriter<W> {
+    inner: W,
+    written: u64,
+    limit: u64,
+}
+
+impl<W: std::io::Write> std::io::Write for CappedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let would_be = self.written.saturating_add(buf.len() as u64);
+        if would_be > self.limit {
+            return Err(std::io::Error::other(format!(
+                "{OUTPUT_LIMIT_EXCEEDED} {} bytes — refusing to continue",
+                self.limit
+            )));
+        }
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Decrypt a binary or armored OpenPGP message with the key's encryption
 /// subkey. Wrong passphrase surfaces as WRONG_PASSPHRASE; malformed input
 /// returns an error instead of panicking.
+///
+/// Thin wrapper over [`decrypt_stream`] — see that function for the
+/// constant-memory streaming path. Caps output at `DECRYPT_BYTES_MAX_OUTPUT`
+/// (see its doc comment) since this entry point returns a `Vec`.
 pub fn decrypt_bytes(
     key: &SignedSecretKey,
     pass: &str,
     data: Vec<u8>,
 ) -> Result<Vec<u8>, PgpError> {
+    let mut out = Vec::new();
+    decrypt_stream(key, pass, Cursor::new(data), &mut out, DECRYPT_BYTES_MAX_OUTPUT)?;
+    Ok(out)
+}
+
+/// Streaming decrypt. Reads the (binary or armored) message from `src`,
+/// writes plaintext to `dst`. Constant memory, with output capped at
+/// `max_output` bytes (`u64::MAX` for no cap).
+///
+/// # Why `max_output` — this is not optional
+///
+/// This function uses SEIPDv1 [`Seipdv1ReadMode::Streaming`], which is what
+/// makes constant memory possible at all: rpgp's default `CheckFirst` mode
+/// buffers the ENTIRE decrypted plaintext internally (up to a
+/// `max_message_size`, 1 GiB by default) so it can verify the SEIPDv1 MDC
+/// integrity tag before releasing any plaintext. `Streaming` mode instead
+/// releases plaintext to `dst` as it is produced, and the MDC check only
+/// happens when the underlying stream ends — so **an integrity error
+/// surfaces only after `dst` has already received (possibly tampered)
+/// plaintext**. Callers MUST treat `dst` as a scratch sink and only promote
+/// it to its final name/location after this function returns `Ok(())`;
+/// never expose partially-written output to the user or another process
+/// before that.
+///
+/// Dropping `CheckFirst`'s size cap also drops its side effect of bounding
+/// how much plaintext a message can ever produce. This function also
+/// transparently decompresses (`while msg.is_compressed()`), and
+/// decompression ratios are attacker-controlled by construction — a small
+/// crafted ciphertext (a "decompression bomb", encrypted to the recipient's
+/// PUBLIC key, which needs no secret material to build) could otherwise
+/// stream unbounded plaintext into `dst` until it fails (e.g. the device
+/// fills its storage). `max_output` closes that: once writing would push
+/// the running total past it, decryption stops and this returns an
+/// [`OUTPUT_LIMIT_EXCEEDED`]-prefixed error instead of continuing. Pass
+/// `u64::MAX` to opt out entirely.
+pub fn decrypt_stream<R, W>(
+    key: &SignedSecretKey,
+    pass: &str,
+    src: R,
+    dst: W,
+    max_output: u64,
+) -> Result<(), PgpError>
+where
+    R: std::io::BufRead + std::fmt::Debug + Send,
+    W: std::io::Write,
+{
     let pw = to_password(pass);
 
-    // Pre-flight unlock: Message::decrypt reports MissingKey for both a
-    // wrong passphrase and a message for someone else, so distinguish the
-    // passphrase failure here (primary fallback covers imported
-    // encrypt-capable primaries with no subkey).
+    // Pre-flight unlock: Message::decrypt/decrypt_the_ring reports
+    // MissingKey for both a wrong passphrase and a message for someone
+    // else, so distinguish the passphrase failure here (primary fallback
+    // covers imported encrypt-capable primaries with no subkey).
     match key
         .secret_subkeys
         .iter()
@@ -1423,19 +1595,139 @@ pub fn decrypt_bytes(
     .map_err(wrong_pw)?
     .map_err(|e| PgpError(e.to_string()))?;
 
-    catch_unwind(AssertUnwindSafe(move || -> Result<Vec<u8>, PgpError> {
-        // from_reader auto-detects binary vs armored input.
-        let (msg, _headers) = Message::from_reader(Cursor::new(data))?;
-        let mut msg = msg.decrypt(&pw, key)?;
-        // gpg compresses by default (ZIP/ZLIB — flate2 is always built).
-        while msg.is_compressed() {
-            msg = msg.decompress()?;
-        }
-        // Reads the literal data through a Signed layer transparently.
-        msg.as_data_vec()
-            .map_err(|e| PgpError(format!("Could not read decrypted data: {e}")))
+    catch_unwind(AssertUnwindSafe(move || -> Result<(), PgpError> {
+        // Each step is a SEPARATE #[inline(never)] call ON PURPOSE — see the
+        // block comment below. Do not collapse these back together.
+        let msg = decrypt_parse(src)?;
+        let msg = decrypt_unwrap(msg, &pw, key)?;
+        let mut msg = decrypt_decompress(msg)?;
+        decrypt_copy_out(&mut msg, dst, max_output)
     }))
     .map_err(|_| PgpError("Malformed OpenPGP message (parser crashed)".into()))?
+}
+
+// ---------------------------------------------------------------------------
+// decrypt_stream's steps, each forced into its OWN stack frame
+// ---------------------------------------------------------------------------
+//
+// WHY #[inline(never)] IS LOAD-BEARING — this is a device crash, not style.
+//
+// A KeyOS process gets a 256 KB stack. rpgp's message machinery compiles into
+// enormous ARM frames because each layer `match`es over an algorithm or packet
+// enum and rustc reserves a slot for EVERY arm. Measured on the shipped ELF:
+// `MessageParser::run` 36,608 bytes, `Message::from_reader::<BufReader<fs::File>>`
+// 16,192, `decrypt_the_ring` 13,952, `decompress` 13,888 — and `Message` itself
+// is an ~8.9 KB value (its Edata variant carries decryptor state for every
+// symmetric cipher), so every by-value move costs that much again.
+//
+// Written as one block, LLVM inlines these into a SINGLE frame so the sizes
+// SUM rather than being allocated and popped in turn. That overflowed the
+// stack by 30,268 bytes on hardware on EVERY decrypt — a 256-byte file died
+// exactly like a 64 MB one, leaving the scratch file at 0 bytes because the
+// crash happens during setup, before any plaintext moves. Splitting the steps
+// took the overrun to 7,376 bytes; splitting the armored/binary parse paths
+// (below) closed the rest. Only the returned `Message`, which owns its readers
+// on the heap, carries between steps.
+//
+// Do NOT "optimize" this by passing `Box<Message>` between the steps: that was
+// measured and is WORSE (chain 119,480 -> 123,960), because each step then
+// unboxes a Message onto its own stack instead of receiving it in the caller's
+// existing slot.
+//
+// Same failure as the workspace's `keyos-app-stack-limit` note for
+// `KeyType::generate`: same crate, same versions, same features — only the
+// instantiation shape changed (swapping the source from `Cursor<Vec<u8>>` to
+// `BufReader<fs::File>` for streaming) and the inliner made a different, fatal
+// choice. THE SIMULATOR AND HOST TESTS CANNOT SEE THIS — a macOS thread has an
+// 8 MB stack. Only `scripts/check-stack-frames.sh` on the ARM release build,
+// or hardware, can.
+
+/// Parse the message header.
+///
+/// `Message::from_reader` would do the binary-vs-armored sniff itself, but it
+/// holds BOTH decoding paths live in one 16,192-byte frame. Sniffing here and
+/// calling the two paths through separate `#[inline(never)]` functions means
+/// only the one actually taken is ever on the stack.
+#[inline(never)]
+fn decrypt_parse<'a, R>(mut src: R) -> Result<Message<'a>, PgpError>
+where
+    R: std::io::BufRead + std::fmt::Debug + Send + 'a,
+{
+    // Same rule rpgp's own `is_binary` uses: an OpenPGP packet tag always has
+    // the high bit set, while ASCII armor starts with '-'. `fill_buf` peeks
+    // without consuming, so either path still sees the whole stream.
+    let binary = match src.fill_buf() {
+        Ok(buf) => buf.first().is_some_and(|b| b & 0x80 != 0),
+        Err(e) => return Err(PgpError(format!("Could not read message: {e}"))),
+    };
+    if binary {
+        decrypt_parse_binary(src)
+    } else {
+        decrypt_parse_armored(src)
+    }
+}
+
+#[inline(never)]
+fn decrypt_parse_binary<'a, R>(src: R) -> Result<Message<'a>, PgpError>
+where
+    R: std::io::BufRead + std::fmt::Debug + Send + 'a,
+{
+    Ok(Message::from_bytes(src)?)
+}
+
+#[inline(never)]
+fn decrypt_parse_armored<'a, R>(src: R) -> Result<Message<'a>, PgpError>
+where
+    R: std::io::BufRead + std::fmt::Debug + Send + 'a,
+{
+    let (msg, _headers) = Message::from_armor(src)?;
+    Ok(msg)
+}
+
+/// Recover the session key and wrap the ciphertext in a decrypting reader.
+#[inline(never)]
+fn decrypt_unwrap<'a>(
+    msg: Message<'a>,
+    pw: &Password,
+    key: &SignedSecretKey,
+) -> Result<Message<'a>, PgpError> {
+    let ring = pgp::composed::TheRing {
+        secret_keys: vec![key],
+        key_passwords: vec![pw],
+        decrypt_options: pgp::composed::DecryptionOptions::new()
+            .set_seipdv1_read_mode(pgp::types::Seipdv1ReadMode::Streaming),
+        ..Default::default()
+    };
+    let (msg, _res) = msg.decrypt_the_ring(ring, true)?;
+    Ok(msg)
+}
+
+/// gpg compresses by default (ZIP/ZLIB — flate2 is always built).
+#[inline(never)]
+fn decrypt_decompress(mut msg: Message<'_>) -> Result<Message<'_>, PgpError> {
+    while msg.is_compressed() {
+        msg = msg.decompress()?;
+    }
+    Ok(msg)
+}
+
+/// Stream the literal data out. Reads through a Signed layer transparently.
+#[inline(never)]
+fn decrypt_copy_out<W: std::io::Write>(
+    msg: &mut Message<'_>,
+    dst: W,
+    max_output: u64,
+) -> Result<(), PgpError> {
+    let mut capped = CappedWriter { inner: dst, written: 0, limit: max_output };
+    std::io::copy(msg, &mut capped).map_err(|e| {
+        let text = e.to_string();
+        if text.starts_with(OUTPUT_LIMIT_EXCEEDED) {
+            PgpError(text)
+        } else {
+            PgpError(format!("Could not read decrypted data: {text}"))
+        }
+    })?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

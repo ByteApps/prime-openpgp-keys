@@ -669,3 +669,223 @@ fn gpg_list_packets_shows_provenance_notation() {
         "gpg --list-packets did not show the notation value:\n{out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Streaming encrypt/decrypt (constant-memory path) — large files, both
+// directions, and tamper detection. See pgp-core/tests/streaming_memory.rs
+// for the actual peak-heap assertion; these prove correctness/interop.
+// ---------------------------------------------------------------------------
+
+/// Deterministic pseudorandom bytes (splitmix64, NOT cryptographic) — large
+/// enough to force partial-length packets on the encrypt side and multiple
+/// read chunks on the decrypt side, without committing a fixture that size.
+fn deterministic_bytes(seed: u64, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let mut state = seed;
+    while out.len() < len {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        out.extend_from_slice(&z.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+const LARGE_FILE_LEN: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Round-trips a ~16 MiB file through `encrypt_stream`/`decrypt_stream` in
+/// both directions against a real `gpg` — proves the streaming path (not
+/// just `encrypt_bytes`/`decrypt_bytes`) is wire-compatible at a size that
+/// would have forced partial-length packets and multiple SEIPDv1 chunks.
+fn streaming_large_roundtrip(gpg: &Gpg, key: &pgp::composed::SignedSecretKey, pass: &str, label: &str) {
+    let info = key_info(&PgpKey::Secret(key.clone()));
+    gpg.import(&export_public_armored(&PgpKey::Secret(key.clone())).unwrap());
+    gpg.import(&export_armored(&PgpKey::Secret(key.clone())).unwrap());
+
+    let plain = deterministic_bytes(0xC0FFEE ^ (label.len() as u64), LARGE_FILE_LEN);
+    let plain_path = gpg.home.join(format!("{label}-plain.bin"));
+    std::fs::write(&plain_path, &plain).unwrap();
+
+    // (a) we encrypt (streamed) -> gpg decrypts
+    let ours_cipher_path = gpg.home.join(format!("{label}-ours.gpg"));
+    {
+        let src = std::io::BufReader::new(std::fs::File::open(&plain_path).unwrap());
+        let dst = std::fs::File::create(&ours_cipher_path).unwrap();
+        encrypt_stream(&PgpKey::Secret(key.clone()), "large.bin", src, dst, None)
+            .unwrap_or_else(|e| panic!("{label}: encrypt_stream failed: {e}"));
+    }
+    let gpg_out_path = gpg.home.join(format!("{label}-gpg-decrypted.bin"));
+    let (ok, _, err) = gpg.run(
+        &[
+            "--yes",
+            "--passphrase",
+            pass,
+            "--output",
+            gpg_out_path.to_str().unwrap(),
+            "--decrypt",
+            ours_cipher_path.to_str().unwrap(),
+        ],
+        b"",
+    );
+    assert!(ok, "{label}: gpg -d of our streamed message failed: {err}");
+    let gpg_plain = std::fs::read(&gpg_out_path).unwrap();
+    assert_eq!(gpg_plain.len(), plain.len(), "{label}: gpg-decrypted length mismatch");
+    assert!(gpg_plain == plain, "{label}: gpg-decrypted plaintext mismatch (we-encrypt direction)");
+
+    // (b) gpg encrypts -> we decrypt (streamed)
+    let gpg_cipher_path = gpg.home.join(format!("{label}-gpg.gpg"));
+    let (ok, _, err) = gpg.run(
+        &[
+            "--yes",
+            "--trust-model",
+            "always",
+            "-r",
+            info.key_id.as_str(),
+            "-e",
+            "--output",
+            gpg_cipher_path.to_str().unwrap(),
+            plain_path.to_str().unwrap(),
+        ],
+        b"",
+    );
+    assert!(ok, "{label}: gpg encrypt failed: {err}");
+
+    let ours_plain_path = gpg.home.join(format!("{label}-ours-decrypted.bin"));
+    {
+        let src = std::io::BufReader::new(std::fs::File::open(&gpg_cipher_path).unwrap());
+        let dst = std::fs::File::create(&ours_plain_path).unwrap();
+        decrypt_stream(key, pass, src, dst, u64::MAX)
+            .unwrap_or_else(|e| panic!("{label}: decrypt_stream failed: {e}"));
+    }
+    let ours_plain = std::fs::read(&ours_plain_path).unwrap();
+    assert_eq!(ours_plain.len(), plain.len(), "{label}: our-decrypted length mismatch");
+    assert!(ours_plain == plain, "{label}: our-decrypted plaintext mismatch (gpg-encrypt direction)");
+}
+
+#[test]
+fn streaming_large_file_roundtrip_ed25519() {
+    let Some(gpg) = Gpg::new() else { return };
+    let key = generate_ed25519("Streaming Ed25519", "streaming-ed25519@example.com", Some("s3cret")).unwrap();
+    streaming_large_roundtrip(&gpg, &key, "s3cret", "ed25519");
+}
+
+/// P-521 is the key type that crashed the device on the old triple-buffer
+/// decrypt path (see pgp-core/tests/streaming_memory.rs's doc comment).
+#[test]
+fn streaming_large_file_roundtrip_p521() {
+    let Some(gpg) = Gpg::new() else { return };
+    let key = generate_p521("Streaming P521", "streaming-p521@example.com", Some("s3cret")).unwrap();
+    streaming_large_roundtrip(&gpg, &key, "s3cret", "p521");
+}
+
+/// Proves the `Streaming` SEIPDv1 read mode's trade-off is still caught:
+/// flipping one byte inside the encrypted body must make the end-of-stream
+/// MDC check fail, even though `Streaming` mode already released plaintext
+/// to `dst` before that check ran.
+#[test]
+fn streaming_decrypt_detects_tampered_ciphertext() {
+    let sk = fixture_secret("rsa2048-secret.asc");
+
+    let plain = deterministic_bytes(0xABCDEF, 512 * 1024); // a few hundred KB
+    let mut cipher = Vec::new();
+    encrypt_stream(&PgpKey::Secret(sk.clone()), "t.bin", &plain[..], &mut cipher, None).unwrap();
+
+    // Flip one byte well inside the SEIPD packet body (past the PKESK and
+    // SEIPD packet headers, well before the trailing MDC).
+    let flip_at = cipher.len() * 3 / 4;
+    cipher[flip_at] ^= 0x01;
+
+    let mut out = Vec::new();
+    let res = decrypt_stream(&sk, PASS, std::io::Cursor::new(cipher), &mut out, u64::MAX);
+    assert!(
+        res.is_err(),
+        "tampered ciphertext was NOT rejected — the Streaming-mode MDC check did not fire"
+    );
+}
+
+/// A `Read` that emits `remaining` zero bytes, generated on demand — used to
+/// build a decompression-bomb-shaped ciphertext (tiny on the wire, huge once
+/// decompressed) without ever materializing the huge side in memory.
+struct ZeroReader {
+    remaining: u64,
+}
+
+impl std::io::Read for ZeroReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            return Ok(0);
+        }
+        let n = (buf.len() as u64).min(self.remaining) as usize;
+        buf[..n].fill(0);
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
+
+/// A `Write` that discards bytes but counts them, so the test can assert
+/// `decrypt_stream` never wrote past its cap.
+struct CountingSink(u64);
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len() as u64;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Switching SEIPDv1 decryption to `Streaming` mode drops `CheckFirst`'s
+/// side effect of bounding total plaintext size — and `decrypt_stream`
+/// transparently decompresses, with decompression ratios entirely
+/// attacker-controlled. A small ciphertext encrypted to the recipient's
+/// PUBLIC key (needing no secret material at all) can therefore be a
+/// "decompression bomb": tiny on the wire, unbounded plaintext once
+/// decrypted. `max_output` is what stands between that and filling the
+/// device's storage — this test is the proof it actually stops the bomb,
+/// not just that the parameter compiles.
+#[test]
+fn streaming_decrypt_output_cap_stops_a_decompression_bomb() {
+    let sk = fixture_secret("rsa2048-secret.asc");
+
+    // A few hundred MB of zeros compresses (ZLIB) to a tiny ciphertext —
+    // exactly the bomb shape: small encrypted, huge decrypted.
+    const BOMB_PLAIN_LEN: u64 = 300 * 1024 * 1024; // 300 MiB of zeros
+    let mut cipher = Vec::new();
+    encrypt_stream(
+        &PgpKey::Secret(sk.clone()),
+        "bomb.bin",
+        ZeroReader { remaining: BOMB_PLAIN_LEN },
+        &mut cipher,
+        None,
+    )
+    .unwrap();
+    assert!(
+        (cipher.len() as u64) < BOMB_PLAIN_LEN / 100,
+        "test payload was not actually bomb-shaped: {} ciphertext bytes for {BOMB_PLAIN_LEN} \
+         plaintext bytes",
+        cipher.len(),
+    );
+
+    const CAP: u64 = 1024 * 1024; // 1 MiB — far below the 300 MiB bomb
+    let mut sink = CountingSink(0);
+    let err = decrypt_stream(&sk, PASS, std::io::Cursor::new(cipher), &mut sink, CAP)
+        .expect_err(
+            "decrypt_stream did not stop at the output cap — an unbounded decompression bomb \
+             would fill the device's storage",
+        );
+    assert!(
+        sink.0 <= CAP,
+        "decrypt_stream wrote {} bytes to the sink, past its {CAP}-byte cap",
+        sink.0
+    );
+    assert!(
+        err.0.starts_with(OUTPUT_LIMIT_EXCEEDED),
+        "error should be identifiable as the output-limit case, got: {}",
+        err.0
+    );
+}
