@@ -62,12 +62,20 @@ export global Ui {
     in-out property <bool> show-sign-pass: false;  // sign-file passphrase
     in-out property <bool> show-encrypt-modal: false; // encrypt confirm (+optional sign)
     in-out property <bool> show-decrypt-pass: false;  // decrypt passphrase
+    in-out property <bool> show-checksum-result: false; // checksum result (name/size/hash)
 
     // The import browser doubles as a generic file picker.
-    // 0 = import (.asc only), 1 = sign, 2 = encrypt, 3 = decrypt (all files).
+    // 0 = import (.asc only), 1 = sign, 2 = encrypt, 3 = decrypt, 4 =
+    // checksum (all files, no filter).
     in-out property <int> browse-mode: 0;
     in-out property <string> sign-file-name: "";   // picked file, shown in modals
     in-out property <bool> encrypt-sign: false;    // "Also sign" toggle state
+
+    // Checksum result (no confirm/passphrase — populated straight from the
+    // hash, shown in show-checksum-result).
+    in-out property <string> checksum-name: "";
+    in-out property <string> checksum-size: "";    // e.g. "15728640 bytes (15.0 MB)"
+    in-out property <string> checksum-hash: "";    // lowercase hex, 4-char groups
 
     // Sign-QR flow: scan data with the system QR scanner, sign it, and show
     // the armored signature as a QR code.
@@ -170,6 +178,8 @@ export global Callbacks {
     callback encrypt-file(bool, string);          // also-sign?, passphrase ("" if not signing)
     callback start-decrypt();                     // open browser as decrypt picker
     callback decrypt-file(string);                // passphrase (target staged in Rust)
+
+    callback start-checksum();                    // open browser as checksum picker (no confirm/passphrase)
 
     callback start-sign-qr();                     // open the system QR scanner
     callback sign-qr(string);                     // passphrase (data staged in Rust)

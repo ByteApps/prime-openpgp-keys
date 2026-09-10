@@ -50,13 +50,14 @@ struct CurrentKey {
 }
 
 /// What the file browser (screen 2) is currently picking a file for.
-/// Values mirror `Ui.browse-mode`: 0/1/2/3.
+/// Values mirror `Ui.browse-mode`: 0/1/2/3/4.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BrowseMode {
     Import,
     SignFile,
     Encrypt,
     Decrypt,
+    Checksum,
 }
 
 impl BrowseMode {
@@ -66,6 +67,18 @@ impl BrowseMode {
             BrowseMode::SignFile => 1,
             BrowseMode::Encrypt => 2,
             BrowseMode::Decrypt => 3,
+            BrowseMode::Checksum => 4,
+        }
+    }
+
+    /// Screen to return to once browsing in this mode finishes (success or
+    /// cancel). Sign/Encrypt/Decrypt are launched from the key detail
+    /// screen (1) and return there; Import and Checksum are launched from
+    /// the key list / home `•••` menu (0) and return there.
+    fn return_screen(self) -> i32 {
+        match self {
+            BrowseMode::SignFile | BrowseMode::Encrypt | BrowseMode::Decrypt => 1,
+            BrowseMode::Import | BrowseMode::Checksum => 0,
         }
     }
 }
@@ -337,7 +350,11 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let open_browser = open_browser.clone();
             callbacks.on_start_encrypt(move || open_browser(BrowseMode::Encrypt));
         }
-        callbacks.on_start_decrypt(move || open_browser(BrowseMode::Decrypt));
+        {
+            let open_browser = open_browser.clone();
+            callbacks.on_start_decrypt(move || open_browser(BrowseMode::Decrypt));
+        }
+        callbacks.on_start_checksum(move || open_browser(BrowseMode::Checksum));
     }
 
     {
@@ -370,21 +387,22 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let ui_weak = ui_weak.clone();
         let refresh_keys = refresh_keys.clone();
         callbacks.on_cancel_import(move || {
-            let from_detail = {
+            let return_screen = {
                 let mut s = state.borrow_mut();
-                let was = s.browse_mode != BrowseMode::Import;
+                let screen = s.browse_mode.return_screen();
                 s.browse_mode = BrowseMode::Import;
                 s.browse_target = None;
-                was
+                screen
             };
             if let Some(ui) = ui_weak.upgrade() {
                 show_info(&ui, "");
                 ui.global::<Ui>().set_browse_mode(0);
                 // Sign/encrypt/decrypt picking starts from the key detail
-                // screen; return there. Import returns to the list.
-                ui.global::<Ui>().set_screen(if from_detail { 1 } else { 0 });
+                // screen; return there. Import and Checksum return to the
+                // key list (see BrowseMode::return_screen).
+                ui.global::<Ui>().set_screen(return_screen);
             }
-            if !from_detail {
+            if return_screen == 0 {
                 refresh_keys();
             }
         });
@@ -413,6 +431,59 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             }
 
             let mode = state.borrow().browse_mode;
+            if mode == BrowseMode::Checksum {
+                // No passphrase, no key needed — it's a home-menu action
+                // that works with nothing open. Same busy-overlay +
+                // Timer::single_shot(150ms) trick as the other file
+                // operations: let the overlay paint one frame before the
+                // (potentially slow, for a big file) blocking hash freezes
+                // the single-threaded event loop.
+                let u = ui.global::<Ui>();
+                u.set_busy_text("Hashing file…".into());
+                u.set_busy(true);
+
+                let fs = fs.clone();
+                let state = state.clone();
+                let ui_weak = ui_weak.clone();
+                let name = name.clone();
+                Timer::single_shot(Duration::from_millis(150), move || {
+                    let Some(ui) = ui_weak.upgrade() else { return };
+                    let loc_name = loc_name(loc);
+                    let result = fs
+                        .open_file(&full, loc, OpenFlags::READ_ONLY)
+                        .map_err(|e| err_msg(&e))
+                        .and_then(|f| {
+                            // Capacity matched to fs::FILE_BUFFER_SIZE, same
+                            // reason as the sign/encrypt/decrypt readers.
+                            let reader = BufReader::with_capacity(fs::FILE_BUFFER_SIZE, f);
+                            pgp_core::sha256_stream(reader).map_err(|e| e.0)
+                        });
+                    ui.global::<Ui>().set_busy(false);
+                    match result {
+                        Ok((hex, bytes)) => {
+                            log::info!(
+                                "cb: checksum-file {name} ok sha256={hex} bytes={bytes} loc={loc_name}"
+                            );
+                            let u = ui.global::<Ui>();
+                            u.set_checksum_name(name.clone());
+                            u.set_checksum_size(
+                                format!("{bytes} bytes ({})", human_size(bytes)).into(),
+                            );
+                            u.set_checksum_hash(group_hex(&hex).into());
+                            u.set_show_checksum_result(true);
+                            state.borrow_mut().browse_mode = BrowseMode::Import;
+                            u.set_browse_mode(0);
+                            u.set_screen(0);
+                        }
+                        Err(e) => {
+                            // Stay on the browser so the user can retry.
+                            log::info!("cb: checksum-file {name} err={e}");
+                            show_error(&ui, e);
+                        }
+                    }
+                });
+                return;
+            }
             if mode != BrowseMode::Import {
                 state.borrow_mut().browse_target = Some((full, loc));
                 let u = ui.global::<Ui>();
@@ -426,6 +497,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     }
                     BrowseMode::Decrypt => u.set_show_decrypt_pass(true),
                     BrowseMode::Import => unreachable!(),
+                    BrowseMode::Checksum => unreachable!(),
                 }
                 return;
             }
@@ -1670,7 +1742,7 @@ fn set_detail(ui: &AppWindow, filename: &str, info: &KeyInfo) {
     let mut rows: Vec<DetailRow> = vec![
         DetailRow {
             label: "Fingerprint".into(),
-            value: group_fingerprint(&info.fingerprint).into(),
+            value: group_hex(&info.fingerprint).into(),
         },
         DetailRow {
             label: "Key ID".into(),
@@ -1754,9 +1826,10 @@ fn algo_line(algorithm: &str, size_or_curve: &str) -> String {
     }
 }
 
-/// "AAAA BBBB …" — fingerprint in 4-char groups so it can word-wrap.
-fn group_fingerprint(fpr: &str) -> String {
-    fpr.as_bytes()
+/// "AAAA BBBB …" — a hex string in 4-char groups so it can word-wrap.
+/// Used for both key fingerprints and the checksum result modal's SHA-256.
+fn group_hex(hex: &str) -> String {
+    hex.as_bytes()
         .chunks(4)
         .map(|c| std::str::from_utf8(c).unwrap_or(""))
         .collect::<Vec<_>>()

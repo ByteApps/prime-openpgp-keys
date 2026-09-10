@@ -66,7 +66,7 @@ use pgp::types::{
 };
 use rand::thread_rng;
 use rsa::traits::PublicKeyParts;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 // Re-exported so the app crate doesn't need its own `pgp` dependency.
 pub use pgp::composed::{SignedPublicKey, SignedSecretKey};
@@ -1728,6 +1728,40 @@ fn decrypt_copy_out<W: std::io::Write>(
         }
     })?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Checksum
+// ---------------------------------------------------------------------------
+//
+// Why this exists: a ~15 MB encrypted backup transferred between two Passport
+// Primes on an SD card once arrived 1.1 MB short. It looked completely fine
+// in the file browser — plausible size, opened, copied — and only failed
+// weeks later when someone tried to decrypt it. It was caught only because
+// there happened to be a known-good reference to compare the size against.
+// A SHA-256 readable on both devices would have caught it in seconds without
+// a computer. That is this function.
+
+/// SHA-256 a file's contents, streaming. Returns (lowercase hex, byte count).
+///
+/// Constant memory — same reason `encrypt_stream`/`decrypt_stream` stream:
+/// `src` is read in fixed-size chunks and fed straight into the hasher, the
+/// whole file is never buffered.
+pub fn sha256_stream<R: std::io::Read>(mut src: R) -> Result<(String, u64), PgpError> {
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 32 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = src.read(&mut buf).map_err(|e| PgpError(format!("Read failed: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Ok((hex, total))
 }
 
 // ---------------------------------------------------------------------------

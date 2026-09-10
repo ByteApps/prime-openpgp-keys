@@ -617,3 +617,49 @@ fn created_keys_advertise_algorithm_preferences() {
         "no preferred compression algorithms"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Checksum
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sha256_stream_known_vector() {
+    let (hex, len) = pgp_core::sha256_stream(std::io::Cursor::new(b"abc".as_slice()))
+        .expect("sha256_stream failed");
+    assert_eq!(len, 3);
+    assert_eq!(
+        hex,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+/// Proves the function's fixed-size internal buffer never drops, duplicates,
+/// or reorders bytes across `read()` boundaries: the same multi-megabyte
+/// payload must hash identically whether the source hands it back in large
+/// chunks (a plain `Cursor`, which fills the 32 KiB internal buffer in one
+/// call per chunk) or one byte at a time (forcing thousands of short reads).
+#[test]
+fn sha256_stream_chunking_is_stable() {
+    let data: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8).collect();
+
+    let (whole_hex, whole_len) = pgp_core::sha256_stream(std::io::Cursor::new(data.as_slice()))
+        .expect("single-cursor hash failed");
+    assert_eq!(whole_len, data.len() as u64);
+
+    struct ByteAtATime<'a>(&'a [u8]);
+    impl<'a> std::io::Read for ByteAtATime<'a> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.is_empty() || buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = self.0[0];
+            self.0 = &self.0[1..];
+            Ok(1)
+        }
+    }
+
+    let (trickle_hex, trickle_len) =
+        pgp_core::sha256_stream(ByteAtATime(data.as_slice())).expect("trickle hash failed");
+    assert_eq!(trickle_len, data.len() as u64);
+    assert_eq!(trickle_hex, whole_hex, "chunking must not change the digest");
+}

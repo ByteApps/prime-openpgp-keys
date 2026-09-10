@@ -547,6 +547,7 @@ component ImportView inherits VerticalLayout {
             text: Ui.browse-mode == 1 ? "Choose file to sign"
                 : Ui.browse-mode == 2 ? "Choose file to encrypt"
                 : Ui.browse-mode == 3 ? "Choose file to decrypt"
+                : Ui.browse-mode == 4 ? "Choose file to checksum"
                 : "Import key (.asc)";
             color: Theme.palette-foreground;
             font-family: "Montserrat";
@@ -1086,7 +1087,7 @@ export component AppWindow inherits Window {
                 x: parent.width - self.width - 20px;
                 y: 20px + UISize.control-center-status-bar-height + 44px;
                 width: 230px;
-                height: 118px;
+                height: 171px;
                 background: Theme.palette-surface;
                 border-radius: 14px;
                 border-width: 1px;
@@ -1113,6 +1114,18 @@ export component AppWindow inherits Window {
                         triggered => {
                             Ui.show-menu = false;
                             Callbacks.start-import();
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.palette-border;
+                    }
+                    MenuRow {
+                        text: "Checksum file";
+                        icon: @image-url("icons/file.svg");
+                        triggered => {
+                            Ui.show-menu = false;
+                            Callbacks.start-checksum();
                         }
                     }
                 }
@@ -1430,6 +1443,74 @@ export component AppWindow inherits Window {
                     clicked => {
                         Ui.show-decrypt-pass = false;
                         Callbacks.decrypt-file(Ui.field-pass);
+                    }
+                }
+            }
+        }
+
+        // Checksum result: file name, size, and SHA-256 — grouped and
+        // word-wrapped (like the fingerprint on the detail screen) so it
+        // can be read and compared by eye against another device. No
+        // passphrase, no key — this action works from the home screen with
+        // nothing open.
+        if Ui.show-checksum-result: ModalPanel {
+            width: 100%;
+            height: 100%;
+            title: "Checksum";
+            panel-height: 440px;
+            cancelled => {
+                Ui.show-checksum-result = false;
+            }
+
+            Text {
+                text: "File";
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+                font-weight: 700;
+            }
+            Text {
+                text: Ui.checksum-name;
+                color: Theme.palette-foreground;
+                font-family: "SourceCodePro";
+                font-size: 15px;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Size";
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+                font-weight: 700;
+            }
+            Text {
+                text: Ui.checksum-size;
+                color: Theme.palette-foreground;
+                font-family: "SourceCodePro";
+                font-size: 15px;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "SHA-256";
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+                font-weight: 700;
+            }
+            Text {
+                text: Ui.checksum-hash;
+                color: Theme.palette-foreground;
+                font-family: "SourceCodePro";
+                font-size: 15px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                height: 52px;
+                Button {
+                    full-width: true;
+                    text: "Done";
+                    clicked => {
+                        Ui.show-checksum-result = false;
                     }
                 }
             }
